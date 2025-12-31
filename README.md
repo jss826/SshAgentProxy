@@ -23,10 +23,13 @@ SSH Agent Proxy creates its own named pipe (`\\.\pipe\ssh-agent-proxy`) and acts
 ## Features
 
 - Automatic agent switching based on key fingerprint
-- Merged key listing from both agents
+- Merged key listing from all configured agents
 - Auto-configures `SSH_AUTH_SOCK` environment variable
 - No manual intervention needed after initial setup
 - Persists key-to-agent mappings for faster subsequent operations
+- Minimizes agent restarts by detecting current agent from existing pipe
+- Failure caching to avoid repeated failed attempts
+- Supports any number of SSH agents (not limited to 1Password/Bitwarden)
 
 ## Requirements
 
@@ -108,25 +111,42 @@ The config file is located at `%APPDATA%\SshAgentProxy\config.json`:
   "proxyPipeName": "ssh-agent-proxy",
   "backendPipeName": "openssh-ssh-agent",
   "agents": {
-    "onePassword": {
-      "name": "1Password",
+    "1Password": {
       "processName": "1Password",
-      "exePath": "C:\\Users\\...\\AppData\\Local\\1Password\\app\\8\\1Password.exe"
+      "exePath": "C:\\Users\\...\\AppData\\Local\\1Password\\app\\8\\1Password.exe",
+      "priority": 1
     },
-    "bitwarden": {
-      "name": "Bitwarden",
+    "Bitwarden": {
       "processName": "Bitwarden",
-      "exePath": "C:\\Users\\...\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe"
+      "exePath": "C:\\Users\\...\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe",
+      "priority": 2
     }
   },
   "keyMappings": [],
-  "defaultAgent": "1Password"
+  "defaultAgent": "1Password",
+  "failureCacheTtlSeconds": 60
 }
 ```
 
+### Adding More Agents
+
+You can add any SSH agent that uses the Windows named pipe interface:
+
+```json
+{
+  "agents": {
+    "1Password": { "processName": "1Password", "exePath": "...", "priority": 1 },
+    "Bitwarden": { "processName": "Bitwarden", "exePath": "...", "priority": 2 },
+    "KeePassXC": { "processName": "KeePassXC", "exePath": "...", "priority": 3 }
+  }
+}
+```
+
+The `priority` field determines the order in which agents are tried when searching for a key (lower number = higher priority).
+
 ### Key Mappings
 
-You can pre-configure key-to-agent mappings:
+Key mappings are automatically saved when a successful signing operation occurs. You can also pre-configure mappings:
 
 ```json
 {
@@ -136,6 +156,10 @@ You can pre-configure key-to-agent mappings:
   ]
 }
 ```
+
+The proxy uses these mappings to:
+1. Detect which agent currently owns the backend pipe on startup
+2. Route signing requests directly to the correct agent without trial-and-error
 
 ## How It Works
 
@@ -177,6 +201,15 @@ This usually means the key exists in a different agent. The proxy should switch 
 1. Check the proxy logs for errors
 2. Manually switch using `1` or `2` keys
 3. Verify the key exists in the target application
+
+## Known Limitations
+
+The following edge cases are not handled and may require manual intervention:
+
+- **Stale pipe**: If an agent crashes, the named pipe may remain but become non-functional. Restart the proxy to resolve.
+- **Rotated keys**: If you delete/recreate a key with the same fingerprint, stale mappings in `config.json` may cause routing issues. Manually edit the `keyMappings` array to remove outdated entries.
+- **Multi-key operations**: If a single SSH operation requires keys from multiple agents (rare), only the first key's agent will be used.
+- **Locked vaults**: If an agent's vault is locked, key listing may return empty. Unlock the vault and press `r` to rescan.
 
 ## License
 

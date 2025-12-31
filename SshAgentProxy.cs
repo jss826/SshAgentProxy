@@ -10,18 +10,20 @@ public class SshAgentProxyService : IAsyncDisposable
     private readonly Config _config;
     private readonly NamedPipeAgentServer _server;
     private readonly SemaphoreSlim _stateLock = new(1, 1); // Thread safety for shared state
-    private string _currentAgent;
+    private string? _currentAgent; // null = unknown/not determined yet
     private readonly Dictionary<string, string> _keyToAgent = new(); // fingerprint -> agent name
     private readonly List<SshIdentity> _allKeys = new(); // merged keys from all agents
     private bool _keysScanned = false;
+    private readonly FailureCache _failureCache;
 
     public event Action<string>? OnLog;
-    public string CurrentAgent => _currentAgent;
+    public string? CurrentAgent => _currentAgent;
 
     public SshAgentProxyService(Config config)
     {
         _config = config;
-        _currentAgent = config.DefaultAgent;
+        _currentAgent = null; // Will be determined on first connection
+        _failureCache = new FailureCache(config.FailureCacheTtlSeconds);
         _server = new NamedPipeAgentServer(config.ProxyPipeName, HandleRequestAsync);
         _server.OnLog += msg => OnLog?.Invoke(msg);
 
@@ -39,9 +41,11 @@ public class SshAgentProxyService : IAsyncDisposable
     {
         Log($"Starting proxy on pipe: {_config.ProxyPipeName}");
         Log($"Backend pipe: {_config.BackendPipeName}");
+        Log($"Configured agents: {string.Join(", ", _config.Agents.Keys)}");
+        Log($"Default agent: {_config.DefaultAgent}");
 
-        // Get keys from current backend (without starting/switching agents)
-        await ScanKeysAsync(ct);
+        // Try to detect current agent from existing pipe
+        await DetectCurrentAgentAsync(ct);
 
         _server.Start();
         Log("Proxy server started");
@@ -51,48 +55,136 @@ public class SshAgentProxyService : IAsyncDisposable
         Log("=================");
     }
 
-    public async Task ScanKeysAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Detect which agent currently owns the backend pipe by checking keys against mappings
+    /// </summary>
+    private async Task DetectCurrentAgentAsync(CancellationToken ct)
     {
-        Log("Scanning keys from current backend...");
+        Log("Detecting current agent from backend pipe...");
 
-        // Get keys from current backend (without starting/switching agents)
         using var client = await ConnectToBackendAsync(ct);
         if (client == null)
         {
-            Log("  No backend available");
+            Log("  No backend available - agent will be started on first request");
+            _currentAgent = null;
             return;
         }
 
         try
         {
             var keys = await client.RequestIdentitiesAsync(ct);
-            Log($"  Found {keys.Count} keys");
+            Log($"  Found {keys.Count} keys from backend");
 
+            if (keys.Count == 0)
+            {
+                Log("  No keys - cannot determine agent");
+                _currentAgent = null;
+                return;
+            }
+
+            // Check keys against known mappings to identify current agent
+            var agentVotes = new Dictionary<string, int>();
             foreach (var key in keys)
             {
-                // Add mapping if not already known (map to current agent)
-                if (!_keyToAgent.ContainsKey(key.Fingerprint))
+                if (_keyToAgent.TryGetValue(key.Fingerprint, out var mappedAgent))
                 {
-                    _keyToAgent[key.Fingerprint] = _currentAgent;
+                    agentVotes.TryGetValue(mappedAgent, out var count);
+                    agentVotes[mappedAgent] = count + 1;
+                    Log($"    [{mappedAgent}] {key.Comment} ({key.Fingerprint}) - mapped");
+                }
+                else
+                {
+                    Log($"    [?] {key.Comment} ({key.Fingerprint}) - unmapped");
                 }
 
-                // Check for duplicates
+                // Add to allKeys if not already present
                 if (!_allKeys.Any(k => k.Fingerprint == key.Fingerprint))
                 {
                     _allKeys.Add(key);
                 }
+            }
 
-                var agent = _keyToAgent[key.Fingerprint];
-                Log($"    [{agent}] {key.Comment} ({key.Fingerprint})");
+            if (agentVotes.Count > 0)
+            {
+                // Use the agent with most mapped keys
+                var detected = agentVotes.OrderByDescending(v => v.Value).First().Key;
+                _currentAgent = detected;
+                _keysScanned = true;
+                Log($"  Detected current agent: {detected} (by key mapping)");
+
+                // Map unmapped keys to detected agent
+                foreach (var key in keys)
+                {
+                    if (!_keyToAgent.ContainsKey(key.Fingerprint))
+                    {
+                        _keyToAgent[key.Fingerprint] = detected;
+                    }
+                }
+            }
+            else
+            {
+                // No mappings - cannot determine, leave as null
+                Log("  No key mappings found - agent unknown");
+                _currentAgent = null;
             }
         }
         catch (Exception ex)
         {
-            Log($"  Error: {ex.Message}");
+            Log($"  Error detecting agent: {ex.Message}");
+            _currentAgent = null;
+        }
+    }
+
+    /// <summary>
+    /// Save a key mapping to config and persist to disk
+    /// </summary>
+    private void SaveKeyMapping(string fingerprint, string agent)
+    {
+        // Update in-memory mapping
+        _keyToAgent[fingerprint] = agent;
+
+        // Check if already in config
+        var existing = _config.KeyMappings.FirstOrDefault(m => m.Fingerprint == fingerprint);
+        if (existing != null)
+        {
+            if (existing.Agent == agent)
+                return; // No change needed
+            existing.Agent = agent;
+        }
+        else
+        {
+            _config.KeyMappings.Add(new KeyMapping { Fingerprint = fingerprint, Agent = agent });
         }
 
-        _keysScanned = _allKeys.Count > 0;
-        Log($"  Total: {_allKeys.Count} keys, {_keyToAgent.Count} mappings");
+        // Persist to disk
+        try
+        {
+            _config.Save();
+            Log($"    Mapping saved: {fingerprint} -> {agent}");
+        }
+        catch (Exception ex)
+        {
+            Log($"    Warning: Failed to save mapping: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get agent config by name, returns null if not found
+    /// </summary>
+    private AgentAppConfig? GetAgentConfig(string agentName)
+    {
+        return _config.Agents.TryGetValue(agentName, out var config) ? config : null;
+    }
+
+    /// <summary>
+    /// Rescan all agents for keys (public wrapper for ScanAllAgentsAsync)
+    /// </summary>
+    public async Task ScanKeysAsync(CancellationToken ct = default)
+    {
+        Log("Rescanning all agents...");
+        _allKeys.Clear();
+        _keysScanned = false;
+        await ScanAllAgentsAsync(ct);
     }
 
     private async Task<NamedPipeAgentClient?> ConnectToBackendAsync(CancellationToken ct = default)
@@ -112,12 +204,12 @@ public class SshAgentProxyService : IAsyncDisposable
 
     public Task ForceSwitchToAsync(string agentName, CancellationToken ct = default)
     {
-        return ForceSwitchToAsync(agentName, startSecondary: true, ct);
+        return ForceSwitchToAsync(agentName, startOthers: true, ct);
     }
 
-    public Task ForceSwitchToAsync(string agentName, bool startSecondary, CancellationToken ct = default)
+    public Task ForceSwitchToAsync(string agentName, bool startOthers, CancellationToken ct = default)
     {
-        return SwitchToAsync(agentName, startSecondary, force: true, ct);
+        return SwitchToAsync(agentName, startOthers, force: true, ct);
     }
 
     /// <summary>
@@ -125,9 +217,12 @@ public class SshAgentProxyService : IAsyncDisposable
     /// </summary>
     public async Task EnsureAgentRunningAsync(string agentName, CancellationToken ct = default)
     {
-        var agent = agentName == "1Password"
-            ? _config.Agents.OnePassword
-            : _config.Agents.Bitwarden;
+        var agent = GetAgentConfig(agentName);
+        if (agent == null)
+        {
+            Log($"Warning: Agent '{agentName}' not configured");
+            return;
+        }
 
         var processes = Process.GetProcessesByName(agent.ProcessName);
         if (processes.Length > 0)
@@ -145,25 +240,26 @@ public class SshAgentProxyService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Start the secondary agent in the background (fire and forget).
+    /// Start other agents in the background (fire and forget).
     /// Exceptions are caught and logged since this is called without await.
     /// </summary>
-    private async Task EnsureSecondaryAgentRunningAsync(string primaryAgent, CancellationToken ct)
+    private async Task EnsureOtherAgentsRunningAsync(string primaryAgent, CancellationToken ct)
     {
         try
         {
-            var secondaryName = primaryAgent == "1Password" ? "Bitwarden" : "1Password";
-            var secondary = primaryAgent == "1Password"
-                ? _config.Agents.Bitwarden
-                : _config.Agents.OnePassword;
+            foreach (var otherAgentName in _config.GetOtherAgents(primaryAgent))
+            {
+                var otherAgent = GetAgentConfig(otherAgentName);
+                if (otherAgent == null) continue;
 
-            var processes = Process.GetProcessesByName(secondary.ProcessName);
-            if (processes.Length > 0)
-                return; // Already running
+                var processes = Process.GetProcessesByName(otherAgent.ProcessName);
+                if (processes.Length > 0)
+                    continue; // Already running
 
-            Log($"  Starting {secondaryName} in background...");
-            await Task.Delay(1000, ct); // Brief delay before starting secondary
-            StartProcessIfNeeded(secondary.ProcessName, secondary.ExePath);
+                Log($"  Starting {otherAgentName} in background...");
+                await Task.Delay(1000, ct); // Brief delay before starting
+                StartProcessIfNeeded(otherAgent.ProcessName, otherAgent.ExePath);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -171,16 +267,16 @@ public class SshAgentProxyService : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Log($"  Warning: Failed to start secondary agent: {ex.Message}");
+            Log($"  Warning: Failed to start other agents: {ex.Message}");
         }
     }
 
     public async Task SwitchToAsync(string agentName, CancellationToken ct = default)
     {
-        await SwitchToAsync(agentName, startSecondary: true, force: false, ct);
+        await SwitchToAsync(agentName, startOthers: true, force: false, ct);
     }
 
-    public async Task SwitchToAsync(string agentName, bool startSecondary, bool force = false, CancellationToken ct = default)
+    public async Task SwitchToAsync(string agentName, bool startOthers, bool force = false, CancellationToken ct = default)
     {
         if (!force && _currentAgent == agentName)
         {
@@ -188,26 +284,38 @@ public class SshAgentProxyService : IAsyncDisposable
             return;
         }
 
-        Log($"Switching from {_currentAgent} to {agentName}...");
+        var primary = GetAgentConfig(agentName);
+        if (primary == null)
+        {
+            Log($"Warning: Agent '{agentName}' not configured");
+            return;
+        }
 
-        var (primary, secondary) = agentName == "1Password"
-            ? (_config.Agents.OnePassword, _config.Agents.Bitwarden)
-            : (_config.Agents.Bitwarden, _config.Agents.OnePassword);
+        Log($"Switching from {_currentAgent ?? "(none)"} to {agentName}...");
 
-        // 1. Kill processes to release the pipe
-        await KillProcessAsync(primary.ProcessName);
-        await KillProcessAsync(secondary.ProcessName);
+        // 1. Kill all agent processes to release the pipe
+        foreach (var (name, config) in _config.GetAgentsByPriority())
+        {
+            await KillProcessAsync(config.ProcessName);
+        }
         await Task.Delay(1000, ct);
 
         // 2. Start primary first (to acquire the pipe)
         StartProcessIfNeeded(primary.ProcessName, primary.ExePath);
         await Task.Delay(3000, ct); // Wait for startup
 
-        // 3. Start secondary (optional)
-        if (startSecondary)
+        // 3. Start others (optional)
+        if (startOthers)
         {
-            StartProcessIfNeeded(secondary.ProcessName, secondary.ExePath);
-            await Task.Delay(1000, ct);
+            foreach (var otherAgentName in _config.GetOtherAgents(agentName))
+            {
+                var otherAgent = GetAgentConfig(otherAgentName);
+                if (otherAgent != null)
+                {
+                    StartProcessIfNeeded(otherAgent.ProcessName, otherAgent.ExePath);
+                    await Task.Delay(1000, ct);
+                }
+            }
         }
 
         _currentAgent = agentName;
@@ -272,11 +380,11 @@ public class SshAgentProxyService : IAsyncDisposable
     {
         Log("  Scanning all agents for keys...");
 
-        // Scan 1Password
-        await ScanAgentAsync("1Password", ct);
-
-        // Scan Bitwarden
-        await ScanAgentAsync("Bitwarden", ct);
+        // Scan all configured agents by priority
+        foreach (var (agentName, _) in _config.GetAgentsByPriority())
+        {
+            await ScanAgentAsync(agentName, ct);
+        }
 
         _keysScanned = _allKeys.Count > 0;
         Log($"  Total: {_allKeys.Count} keys");
@@ -284,12 +392,18 @@ public class SshAgentProxyService : IAsyncDisposable
 
     private async Task ScanAgentAsync(string agentName, CancellationToken ct)
     {
+        if (GetAgentConfig(agentName) == null)
+        {
+            Log($"    {agentName}: not configured");
+            return;
+        }
+
         Log($"    Scanning {agentName}...");
 
         // Switch to this agent if different from current
         if (_currentAgent != agentName)
         {
-            await ForceSwitchToAsync(agentName, startSecondary: false, ct);
+            await ForceSwitchToAsync(agentName, startOthers: false, ct);
         }
         else
         {
@@ -337,78 +451,106 @@ public class SshAgentProxyService : IAsyncDisposable
 
         Log($"Request: Sign with key {fingerprint}");
 
-        // Use mapped agent if key mapping exists
+        // Step 1: Determine target agent from mapping
+        string? targetAgent = null;
         if (_keyToAgent.TryGetValue(fingerprint, out var mappedAgent))
         {
+            targetAgent = mappedAgent;
             Log($"  Key mapped to {mappedAgent}");
-
-            // Switch only if current agent is different
-            if (_currentAgent != mappedAgent)
-            {
-                Log($"  Switching to {mappedAgent}...");
-                await ForceSwitchToAsync(mappedAgent, startSecondary: false, ct);
-            }
-
-            var signature = await TrySignAsync(keyBlob, data, flags, ct);
-            if (signature != null)
-            {
-                Log($"  Signed by {mappedAgent}");
-                _ = EnsureSecondaryAgentRunningAsync(mappedAgent, ct);
-                return SshAgentMessage.SignResponse(signature);
-            }
-            // Clear stale mapping and try fallback
-            Log($"  Mapped agent failed, trying fallback...");
-            _keyToAgent.Remove(fingerprint);
         }
-
-        // Try current backend (if running)
-        Log($"  Trying current backend...");
-        var sig = await TrySignAsync(keyBlob, data, flags, ct);
-        if (sig != null)
+        else if (_currentAgent != null)
         {
-            _keyToAgent[fingerprint] = _currentAgent;
-            Log($"  Signed by {_currentAgent} (mapping saved)");
-            _ = EnsureSecondaryAgentRunningAsync(_currentAgent, ct);
-            return SshAgentMessage.SignResponse(sig);
-        }
-
-        // Backend not connected or sign failed - try 1Password
-        if (_currentAgent != "1Password")
-        {
-            Log($"  Switching to 1Password...");
-            await ForceSwitchToAsync("1Password", startSecondary: false, ct);
+            targetAgent = _currentAgent;
+            Log($"  No mapping, using current agent: {_currentAgent}");
         }
         else
         {
-            // 1Password is current but not connected - start it
-            Log($"  Starting 1Password...");
-            await EnsureAgentRunningAsync("1Password", ct);
+            targetAgent = _config.DefaultAgent;
+            Log($"  No mapping, no current agent, using default: {_config.DefaultAgent}");
         }
-        await Task.Delay(500, ct);
 
-        sig = await TrySignAsync(keyBlob, data, flags, ct);
-        if (sig != null)
+        // Step 2: If target matches current agent, try signing directly
+        if (targetAgent == _currentAgent && _currentAgent != null)
         {
-            _keyToAgent[fingerprint] = "1Password";
-            Log($"  Signed by 1Password (mapping saved)");
-            _ = EnsureSecondaryAgentRunningAsync("1Password", ct);
-            return SshAgentMessage.SignResponse(sig);
+            if (!_failureCache.IsFailureCached(fingerprint, _currentAgent))
+            {
+                var sig = await TrySignAsync(keyBlob, data, flags, ct);
+                if (sig != null)
+                {
+                    Log($"  Signed by {_currentAgent}");
+                    SaveKeyMapping(fingerprint, _currentAgent);
+                    _failureCache.ClearFailure(fingerprint, _currentAgent);
+                    _ = EnsureOtherAgentsRunningAsync(_currentAgent, ct);
+                    return SshAgentMessage.SignResponse(sig);
+                }
+                Log($"  Sign failed on current agent {_currentAgent}");
+                _failureCache.CacheFailure(fingerprint, _currentAgent);
+            }
+            else
+            {
+                Log($"  Skipping {_currentAgent} (cached failure)");
+            }
         }
 
-        // 1Password failed - try Bitwarden
-        Log($"  Switching to Bitwarden...");
-        await ForceSwitchToAsync("Bitwarden", startSecondary: false, ct);
-
-        sig = await TrySignAsync(keyBlob, data, flags, ct);
-        if (sig != null)
+        // Step 3: Try target agent (if different from current)
+        if (targetAgent != null && targetAgent != _currentAgent)
         {
-            _keyToAgent[fingerprint] = "Bitwarden";
-            Log($"  Signed by Bitwarden (mapping saved)");
-            _ = EnsureSecondaryAgentRunningAsync("Bitwarden", ct);
-            return SshAgentMessage.SignResponse(sig);
+            if (!_failureCache.IsFailureCached(fingerprint, targetAgent))
+            {
+                Log($"  Switching to target agent: {targetAgent}...");
+                await ForceSwitchToAsync(targetAgent, startOthers: false, ct);
+                await Task.Delay(500, ct);
+
+                var sig = await TrySignAsync(keyBlob, data, flags, ct);
+                if (sig != null)
+                {
+                    Log($"  Signed by {targetAgent}");
+                    SaveKeyMapping(fingerprint, targetAgent);
+                    _failureCache.ClearFailure(fingerprint, targetAgent);
+                    _ = EnsureOtherAgentsRunningAsync(targetAgent, ct);
+                    return SshAgentMessage.SignResponse(sig);
+                }
+                Log($"  Sign failed on {targetAgent}");
+                _failureCache.CacheFailure(fingerprint, targetAgent);
+            }
+            else
+            {
+                Log($"  Skipping {targetAgent} (cached failure)");
+            }
         }
 
-        Log("  Sign failed on both agents");
+        // Step 4: Try other agents in priority order
+        Log($"  Trying other agents...");
+        foreach (var (agentName, _) in _config.GetAgentsByPriority())
+        {
+            // Skip already tried agents
+            if (agentName == _currentAgent || agentName == targetAgent)
+                continue;
+
+            if (_failureCache.IsFailureCached(fingerprint, agentName))
+            {
+                Log($"    Skipping {agentName} (cached failure)");
+                continue;
+            }
+
+            Log($"    Trying {agentName}...");
+            await ForceSwitchToAsync(agentName, startOthers: false, ct);
+            await Task.Delay(500, ct);
+
+            var sig = await TrySignAsync(keyBlob, data, flags, ct);
+            if (sig != null)
+            {
+                Log($"  Signed by {agentName}");
+                SaveKeyMapping(fingerprint, agentName);
+                _failureCache.ClearFailure(fingerprint, agentName);
+                _ = EnsureOtherAgentsRunningAsync(agentName, ct);
+                return SshAgentMessage.SignResponse(sig);
+            }
+            Log($"    Sign failed on {agentName}");
+            _failureCache.CacheFailure(fingerprint, agentName);
+        }
+
+        Log("  Sign failed on all agents");
         return SshAgentMessage.Failure();
     }
 

@@ -23,10 +23,13 @@ SSH Agent Proxyは独自の名前付きパイプ（`\\.\pipe\ssh-agent-proxy`）
 ## 機能
 
 - キーのフィンガープリントに基づく自動エージェント切り替え
-- 両エージェントからのキー一覧のマージ
+- 設定されたすべてのエージェントからのキー一覧のマージ
 - `SSH_AUTH_SOCK` 環境変数の自動設定
 - 初期設定後は手動操作不要
 - キーとエージェントのマッピングを保存して次回以降の動作を高速化
+- 既存のパイプから現在のエージェントを検出してエージェント再起動を最小化
+- 失敗のキャッシュで無駄な再試行を回避
+- 任意の数のSSHエージェントに対応（1Password/Bitwardenに限定されない）
 
 ## 必要要件
 
@@ -108,25 +111,42 @@ SshAgentProxy.exe --uninstall
   "proxyPipeName": "ssh-agent-proxy",
   "backendPipeName": "openssh-ssh-agent",
   "agents": {
-    "onePassword": {
-      "name": "1Password",
+    "1Password": {
       "processName": "1Password",
-      "exePath": "C:\\Users\\...\\AppData\\Local\\1Password\\app\\8\\1Password.exe"
+      "exePath": "C:\\Users\\...\\AppData\\Local\\1Password\\app\\8\\1Password.exe",
+      "priority": 1
     },
-    "bitwarden": {
-      "name": "Bitwarden",
+    "Bitwarden": {
       "processName": "Bitwarden",
-      "exePath": "C:\\Users\\...\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe"
+      "exePath": "C:\\Users\\...\\AppData\\Local\\Programs\\Bitwarden\\Bitwarden.exe",
+      "priority": 2
     }
   },
   "keyMappings": [],
-  "defaultAgent": "1Password"
+  "defaultAgent": "1Password",
+  "failureCacheTtlSeconds": 60
 }
 ```
 
+### エージェントの追加
+
+Windows名前付きパイプインターフェースを使用する任意のSSHエージェントを追加できます：
+
+```json
+{
+  "agents": {
+    "1Password": { "processName": "1Password", "exePath": "...", "priority": 1 },
+    "Bitwarden": { "processName": "Bitwarden", "exePath": "...", "priority": 2 },
+    "KeePassXC": { "processName": "KeePassXC", "exePath": "...", "priority": 3 }
+  }
+}
+```
+
+`priority` フィールドはキー検索時にエージェントを試行する順序を決定します（小さい数値 = 高い優先度）。
+
 ### キーマッピング
 
-キーとエージェントのマッピングを事前設定できます：
+キーマッピングは署名操作が成功すると自動的に保存されます。事前設定も可能です：
 
 ```json
 {
@@ -136,6 +156,10 @@ SshAgentProxy.exe --uninstall
   ]
 }
 ```
+
+プロキシはこれらのマッピングを以下の目的で使用します：
+1. 起動時にバックエンドパイプを現在所有しているエージェントを検出
+2. 試行錯誤なしで署名リクエストを正しいエージェントに直接ルーティング
 
 ## 動作の仕組み
 
@@ -177,6 +201,15 @@ SSHクライアント → プロキシ → キー所有者確認 → 必要に�
 1. プロキシのログでエラーを確認
 2. `1` または `2` キーで手動切り替え
 3. ターゲットアプリケーションにキーが存在するか確認
+
+## 既知の制限事項
+
+以下のエッジケースは対応しておらず、手動での対処が必要な場合があります：
+
+- **古いパイプ**: エージェントがクラッシュすると、名前付きパイプは残るが機能しなくなることがあります。プロキシを再起動して解決してください。
+- **キーのローテーション**: 同じフィンガープリントでキーを削除/再作成すると、`config.json` の古いマッピングがルーティング問題を引き起こす可能性があります。`keyMappings` 配列を手動で編集して古いエントリを削除してください。
+- **マルチキー操作**: 単一のSSH操作で複数のエージェントのキーが必要な場合（まれ）、最初のキーのエージェントのみが使用されます。
+- **ロックされたVault**: エージェントのVaultがロックされている場合、キー一覧が空になることがあります。Vaultをアンロックして `r` を押してキーを再スキャンしてください。
 
 ## ライセンス
 
