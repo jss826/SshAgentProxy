@@ -4,3 +4,4 @@ obj/
 .vs/
 .claude/
 claude.log
+TestResults/
