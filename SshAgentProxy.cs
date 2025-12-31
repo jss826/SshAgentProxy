@@ -417,11 +417,11 @@ public class SshAgentProxyService : IAsyncDisposable
         Log($"  Stopping {processName} ({processes.Length} processes)...");
         try
         {
-            // Use WMIC (works across sessions)
+            // Use PowerShell CIM (WMIC replacement, works across sessions)
             var psi = new ProcessStartInfo
             {
-                FileName = "wmic",
-                Arguments = $"process where name='{processName}.exe' delete",
+                FileName = "powershell",
+                Arguments = $"-NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='{processName}.exe'\\\" | Invoke-CimMethod -MethodName Terminate\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -431,9 +431,9 @@ public class SshAgentProxyService : IAsyncDisposable
             if (proc != null)
             {
                 await proc.WaitForExitAsync();
-                var output = await proc.StandardOutput.ReadToEndAsync();
-                if (!string.IsNullOrEmpty(output) && output.Contains("error", StringComparison.OrdinalIgnoreCase))
-                    Log($"    wmic: {output.Trim()}");
+                var error = await proc.StandardError.ReadToEndAsync();
+                if (!string.IsNullOrEmpty(error))
+                    Log($"    CIM: {error.Trim()}");
             }
 
             // Wait for process to fully terminate
