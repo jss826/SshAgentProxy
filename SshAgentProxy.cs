@@ -216,53 +216,78 @@ public class SshAgentProxyService : IAsyncDisposable
 
     private async Task<SshAgentMessage> HandleRequestIdentitiesFromBackendAsync(CancellationToken ct)
     {
-        // まず現在のbackendに接続を試みる
-        var client = await ConnectToBackendAsync(ct);
+        // 両方のagentから鍵を取得
+        await ScanAllAgentsAsync(ct);
 
-        // 接続できなければ、デフォルトagentを起動
-        if (client == null)
+        if (_allKeys.Count == 0)
         {
-            Log($"  No backend, starting {_config.DefaultAgent}...");
-            await EnsureAgentRunningAsync(_config.DefaultAgent, ct);
-            await Task.Delay(500, ct); // パイプ安定化待ち
-            client = await ConnectToBackendAsync(ct);
-        }
-
-        if (client == null)
-        {
-            Log("  Failed to connect to backend");
+            Log("  No keys found from any agent");
             return SshAgentMessage.Failure();
         }
 
-        using (client)
+        Log($"  Returning {_allKeys.Count} keys from all agents");
+        return SshAgentMessage.IdentitiesAnswer(_allKeys);
+    }
+
+    private async Task ScanAllAgentsAsync(CancellationToken ct)
+    {
+        Log("  Scanning all agents for keys...");
+
+        // 1Password をスキャン
+        await ScanAgentAsync("1Password", ct);
+
+        // Bitwarden をスキャン
+        await ScanAgentAsync("Bitwarden", ct);
+
+        _keysScanned = _allKeys.Count > 0;
+        Log($"  Total: {_allKeys.Count} keys");
+    }
+
+    private async Task ScanAgentAsync(string agentName, CancellationToken ct)
+    {
+        Log($"    Scanning {agentName}...");
+
+        // 現在のagentと違う場合は切り替え
+        if (_currentAgent != agentName)
         {
-            try
-            {
-                var identities = await client.RequestIdentitiesAsync(ct);
-                Log($"  Found {identities.Count} keys from {_currentAgent}");
+            await ForceSwitchToAsync(agentName, startSecondary: false, ct);
+        }
+        else
+        {
+            // 同じagentでも起動していなければ起動
+            await EnsureAgentRunningAsync(agentName, ct);
+        }
 
-                foreach (var id in identities)
+        await Task.Delay(500, ct); // パイプ安定化待ち
+
+        using var client = await ConnectToBackendAsync(ct);
+        if (client == null)
+        {
+            Log($"    {agentName}: not available");
+            return;
+        }
+
+        try
+        {
+            var keys = await client.RequestIdentitiesAsync(ct);
+            Log($"    {agentName}: {keys.Count} keys");
+
+            foreach (var key in keys)
+            {
+                if (!_keyToAgent.ContainsKey(key.Fingerprint))
                 {
-                    // マッピングに追加
-                    if (!_keyToAgent.ContainsKey(id.Fingerprint))
-                    {
-                        _keyToAgent[id.Fingerprint] = _currentAgent;
-                    }
-                    if (!_allKeys.Any(k => k.Fingerprint == id.Fingerprint))
-                    {
-                        _allKeys.Add(id);
-                    }
-                    Log($"    - {id.Comment} ({id.Fingerprint})");
+                    _keyToAgent[key.Fingerprint] = agentName;
                 }
-
-                _keysScanned = identities.Count > 0;
-                return SshAgentMessage.IdentitiesAnswer(identities);
+                if (!_allKeys.Any(k => k.Fingerprint == key.Fingerprint))
+                {
+                    _allKeys.Add(key);
+                    Log($"      [{agentName}] {key.Comment} ({key.Fingerprint})");
+                }
             }
-            catch (Exception ex)
-            {
-                Log($"  Error: {ex.Message}");
-                return SshAgentMessage.Failure();
-            }
+        }
+        catch (Exception ex)
+        {
+            Log($"    {agentName}: error - {ex.Message}");
         }
     }
 
