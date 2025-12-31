@@ -1,5 +1,7 @@
 # SSH Agent Proxy
 
+[日本語版 README](README.ja.md)
+
 A Windows SSH agent proxy that automatically switches between **1Password** and **Bitwarden** SSH agents based on which key is requested.
 
 ## Problem
