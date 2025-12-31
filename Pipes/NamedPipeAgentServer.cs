@@ -45,7 +45,7 @@ public class NamedPipeAgentServer : IDisposable
         {
             try
             {
-                // Security: Grant full control to current user
+                // Security: Only allow current user (ssh.exe runs as current user)
                 var security = new PipeSecurity();
                 var currentUser = WindowsIdentity.GetCurrent().User;
                 if (currentUser != null)
@@ -55,11 +55,6 @@ public class NamedPipeAgentServer : IDisposable
                         PipeAccessRights.FullControl,
                         AccessControlType.Allow));
                 }
-                // Allow read/write access to Everyone (so ssh-add etc. can connect)
-                security.AddAccessRule(new PipeAccessRule(
-                    new SecurityIdentifier(WellKnownSidType.WorldSid, null),
-                    PipeAccessRights.ReadWrite,
-                    AccessControlType.Allow));
 
                 var pipe = NamedPipeServerStreamAcl.Create(
                     _pipeName,

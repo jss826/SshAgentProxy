@@ -9,6 +9,7 @@ public class SshAgentProxyService : IAsyncDisposable
 {
     private readonly Config _config;
     private readonly NamedPipeAgentServer _server;
+    private readonly SemaphoreSlim _stateLock = new(1, 1); // Thread safety for shared state
     private string _currentAgent;
     private readonly Dictionary<string, string> _keyToAgent = new(); // fingerprint -> agent name
     private readonly List<SshIdentity> _allKeys = new(); // merged keys from all agents
@@ -116,9 +117,7 @@ public class SshAgentProxyService : IAsyncDisposable
 
     public Task ForceSwitchToAsync(string agentName, bool startSecondary, CancellationToken ct = default)
     {
-        // Force switch (ignore current agent state)
-        _currentAgent = agentName == "1Password" ? "Bitwarden" : "1Password";
-        return SwitchToAsync(agentName, startSecondary, ct);
+        return SwitchToAsync(agentName, startSecondary, force: true, ct);
     }
 
     /// <summary>
@@ -146,32 +145,44 @@ public class SshAgentProxyService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Start the secondary agent in the background (fire and forget)
+    /// Start the secondary agent in the background (fire and forget).
+    /// Exceptions are caught and logged since this is called without await.
     /// </summary>
     private async Task EnsureSecondaryAgentRunningAsync(string primaryAgent, CancellationToken ct)
     {
-        var secondaryName = primaryAgent == "1Password" ? "Bitwarden" : "1Password";
-        var secondary = primaryAgent == "1Password"
-            ? _config.Agents.Bitwarden
-            : _config.Agents.OnePassword;
+        try
+        {
+            var secondaryName = primaryAgent == "1Password" ? "Bitwarden" : "1Password";
+            var secondary = primaryAgent == "1Password"
+                ? _config.Agents.Bitwarden
+                : _config.Agents.OnePassword;
 
-        var processes = Process.GetProcessesByName(secondary.ProcessName);
-        if (processes.Length > 0)
-            return; // Already running
+            var processes = Process.GetProcessesByName(secondary.ProcessName);
+            if (processes.Length > 0)
+                return; // Already running
 
-        Log($"  Starting {secondaryName} in background...");
-        await Task.Delay(1000, ct); // Brief delay before starting secondary
-        StartProcessIfNeeded(secondary.ProcessName, secondary.ExePath);
+            Log($"  Starting {secondaryName} in background...");
+            await Task.Delay(1000, ct); // Brief delay before starting secondary
+            StartProcessIfNeeded(secondary.ProcessName, secondary.ExePath);
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignore cancellation
+        }
+        catch (Exception ex)
+        {
+            Log($"  Warning: Failed to start secondary agent: {ex.Message}");
+        }
     }
 
     public async Task SwitchToAsync(string agentName, CancellationToken ct = default)
     {
-        await SwitchToAsync(agentName, startSecondary: true, ct);
+        await SwitchToAsync(agentName, startSecondary: true, force: false, ct);
     }
 
-    public async Task SwitchToAsync(string agentName, bool startSecondary, CancellationToken ct = default)
+    public async Task SwitchToAsync(string agentName, bool startSecondary, bool force = false, CancellationToken ct = default)
     {
-        if (_currentAgent == agentName)
+        if (!force && _currentAgent == agentName)
         {
             Log($"Already using {agentName}");
             return;
@@ -205,12 +216,21 @@ public class SshAgentProxyService : IAsyncDisposable
 
     private async Task<SshAgentMessage> HandleRequestAsync(SshAgentMessage request, CancellationToken ct)
     {
-        return request.Type switch
+        // Acquire lock for thread safety (multiple clients can connect concurrently)
+        await _stateLock.WaitAsync(ct);
+        try
         {
-            SshAgentMessageType.SSH_AGENTC_REQUEST_IDENTITIES => await HandleRequestIdentitiesAsync(ct),
-            SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST => await HandleSignRequestAsync(request.Payload, ct),
-            _ => await ForwardRequestAsync(request, ct),
-        };
+            return request.Type switch
+            {
+                SshAgentMessageType.SSH_AGENTC_REQUEST_IDENTITIES => await HandleRequestIdentitiesAsync(ct),
+                SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST => await HandleSignRequestAsync(request.Payload, ct),
+                _ => await ForwardRequestAsync(request, ct),
+            };
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
     }
 
     private Task<SshAgentMessage> HandleRequestIdentitiesAsync(CancellationToken ct)
@@ -396,14 +416,22 @@ public class SshAgentProxyService : IAsyncDisposable
     {
         using var client = await ConnectToBackendAsync(ct);
         if (client == null)
+        {
+            Log("    Sign: backend not connected");
             return null;
+        }
 
         try
         {
             return await client.SignAsync(keyBlob, data, flags, ct);
         }
-        catch
+        catch (OperationCanceledException)
         {
+            throw; // Re-throw cancellation
+        }
+        catch (Exception ex)
+        {
+            Log($"    Sign error: {ex.Message}");
             return null;
         }
     }

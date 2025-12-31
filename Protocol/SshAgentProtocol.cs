@@ -6,28 +6,34 @@ public static class SshAgentProtocol
 {
     public static async Task<SshAgentMessage?> ReadMessageAsync(Stream stream, CancellationToken ct = default)
     {
+        // Read 4-byte length header with proper loop (partial reads are valid on pipes)
         var lengthBuffer = new byte[4];
-        var bytesRead = await stream.ReadAsync(lengthBuffer, ct);
-        if (bytesRead == 0)
+        var headerRead = 0;
+        while (headerRead < 4)
         {
-            System.Diagnostics.Debug.WriteLine("[Protocol] Read 0 bytes - client disconnected");
-            return null;
-        }
-        if (bytesRead < 4)
-        {
-            System.Diagnostics.Debug.WriteLine($"[Protocol] Read only {bytesRead} bytes for length header");
-            throw new InvalidDataException("Failed to read message length");
+            var bytesRead = await stream.ReadAsync(lengthBuffer.AsMemory(headerRead, 4 - headerRead), ct);
+            if (bytesRead == 0)
+            {
+                if (headerRead == 0)
+                {
+                    System.Diagnostics.Debug.WriteLine("[Protocol] Read 0 bytes - client disconnected");
+                    return null;
+                }
+                throw new InvalidDataException("Unexpected end of stream while reading header");
+            }
+            headerRead += bytesRead;
         }
 
         var length = BinaryPrimitives.ReadUInt32BigEndian(lengthBuffer);
         if (length == 0 || length > 256 * 1024)
             throw new InvalidDataException($"Invalid message length: {length}");
 
+        // Read payload with loop
         var payload = new byte[length];
         var totalRead = 0;
         while (totalRead < length)
         {
-            bytesRead = await stream.ReadAsync(payload.AsMemory(totalRead, (int)length - totalRead), ct);
+            var bytesRead = await stream.ReadAsync(payload.AsMemory(totalRead, (int)length - totalRead), ct);
             if (bytesRead == 0)
                 throw new InvalidDataException("Unexpected end of stream");
             totalRead += bytesRead;
@@ -70,15 +76,25 @@ public static class SshAgentProtocol
         var span = payload.Span;
         var offset = 0;
 
-        var keyBlobLen = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
+        // Validate keyBlob length
+        if (offset + 4 > span.Length)
+            throw new InvalidDataException("Sign request too short: missing keyBlob length");
+        var keyBlobLen = (int)BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
         offset += 4;
-        var keyBlob = span.Slice(offset, (int)keyBlobLen).ToArray();
-        offset += (int)keyBlobLen;
+        if (keyBlobLen < 0 || offset + keyBlobLen > span.Length)
+            throw new InvalidDataException($"Sign request invalid: keyBlob length {keyBlobLen} exceeds payload");
+        var keyBlob = span.Slice(offset, keyBlobLen).ToArray();
+        offset += keyBlobLen;
 
-        var dataLen = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
+        // Validate data length
+        if (offset + 4 > span.Length)
+            throw new InvalidDataException("Sign request too short: missing data length");
+        var dataLen = (int)BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
         offset += 4;
-        var data = span.Slice(offset, (int)dataLen).ToArray();
-        offset += (int)dataLen;
+        if (dataLen < 0 || offset + dataLen > span.Length)
+            throw new InvalidDataException($"Sign request invalid: data length {dataLen} exceeds payload");
+        var data = span.Slice(offset, dataLen).ToArray();
+        offset += dataLen;
 
         uint flags = 0;
         if (offset + 4 <= span.Length)
@@ -95,20 +111,36 @@ public static class SshAgentProtocol
         var offset = 0;
         var identities = new List<SshIdentity>();
 
+        if (span.Length < 4)
+            throw new InvalidDataException("Identities answer too short: missing count");
         var count = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
         offset += 4;
 
+        // Sanity check: limit to reasonable number of identities
+        if (count > 1000)
+            throw new InvalidDataException($"Identities answer invalid: count {count} exceeds limit");
+
         for (var i = 0; i < count; i++)
         {
-            var keyBlobLen = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
+            // Validate keyBlob length
+            if (offset + 4 > span.Length)
+                throw new InvalidDataException($"Identities answer truncated at identity {i}: missing keyBlob length");
+            var keyBlobLen = (int)BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
             offset += 4;
-            var keyBlob = span.Slice(offset, (int)keyBlobLen).ToArray();
-            offset += (int)keyBlobLen;
+            if (keyBlobLen < 0 || offset + keyBlobLen > span.Length)
+                throw new InvalidDataException($"Identities answer invalid: keyBlob length {keyBlobLen} exceeds payload");
+            var keyBlob = span.Slice(offset, keyBlobLen).ToArray();
+            offset += keyBlobLen;
 
-            var commentLen = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
+            // Validate comment length
+            if (offset + 4 > span.Length)
+                throw new InvalidDataException($"Identities answer truncated at identity {i}: missing comment length");
+            var commentLen = (int)BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
             offset += 4;
-            var comment = System.Text.Encoding.UTF8.GetString(span.Slice(offset, (int)commentLen));
-            offset += (int)commentLen;
+            if (commentLen < 0 || offset + commentLen > span.Length)
+                throw new InvalidDataException($"Identities answer invalid: comment length {commentLen} exceeds payload");
+            var comment = System.Text.Encoding.UTF8.GetString(span.Slice(offset, commentLen));
+            offset += commentLen;
 
             identities.Add(new SshIdentity(keyBlob, comment));
         }

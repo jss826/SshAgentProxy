@@ -70,10 +70,14 @@ public class NamedPipeAgentClient : IDisposable
         if (response == null || response.Value.Type != SshAgentMessageType.SSH_AGENT_SIGN_RESPONSE)
             return null;
 
-        // Parse signature from response
+        // Parse signature from response with bounds checking
         var payload = response.Value.Payload.Span;
-        var sigLen = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(payload);
-        return payload.Slice(4, (int)sigLen).ToArray();
+        if (payload.Length < 4)
+            throw new InvalidDataException("Sign response too short: missing signature length");
+        var sigLen = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(payload);
+        if (sigLen < 0 || 4 + sigLen > payload.Length)
+            throw new InvalidDataException($"Sign response invalid: signature length {sigLen} exceeds payload");
+        return payload.Slice(4, sigLen).ToArray();
     }
 
     private static void WriteUInt32BigEndian(BinaryWriter writer, uint value)
