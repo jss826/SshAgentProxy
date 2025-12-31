@@ -138,7 +138,8 @@ You can pre-configure key-to-agent mappings:
 2. **Backend Pipe**: Forwards requests to `\\.\pipe\openssh-ssh-agent` (owned by the active agent)
 3. **Key Discovery**: On first identity request, scans both agents to build a complete key list
 4. **Smart Routing**: When signing, checks which agent owns the key and switches if necessary
-5. **Process Management**: Uses WMIC to terminate processes across sessions when switching agents
+5. **Process Management**: Uses PowerShell CIM to terminate processes across sessions when switching agents
+6. **Both Agents Running**: After signing, automatically starts the secondary agent so both are available
 
 ### Agent Switching Flow
 
