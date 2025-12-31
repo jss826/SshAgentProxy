@@ -6,3 +6,4 @@ obj/
 claude.log
 TestResults/
 publish/
+*.zip

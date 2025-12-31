@@ -1,5 +1,10 @@
 # SSH Agent Proxy
 
+[![CI](https://github.com/jss826/SshAgentProxy/actions/workflows/ci.yml/badge.svg)](https://github.com/jss826/SshAgentProxy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/jss826/SshAgentProxy)](https://github.com/jss826/SshAgentProxy/releases)
+[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
+
 [English README](README.md)
 
 Windows用のSSHエージェントプロキシ。要求されたキーに応じて **1Password** と **Bitwarden** のSSHエージェントを自動的に切り替えます。
