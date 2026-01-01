@@ -11,7 +11,9 @@ A Windows SSH agent proxy that automatically switches between **1Password** and 
 
 ## Problem
 
-On Windows, only one application can own the `\\.\pipe\openssh-ssh-agent` named pipe at a time. If you use SSH keys stored in both 1Password and Bitwarden, you need to manually switch between them - closing one application and opening the other.
+On Windows, both 1Password and Bitwarden use the same named pipe (`\\.\pipe\openssh-ssh-agent`) for their SSH agents. This pipe name is hardcoded and cannot be changed. Only one application can own the pipe at a time, and there is no API to determine which application currently owns it—the only way to find out is to query the pipe (scan or sign).
+
+If you use SSH keys stored in both applications, you need to manually switch between them—closing one application and opening the other.
 
 ## Solution
 
