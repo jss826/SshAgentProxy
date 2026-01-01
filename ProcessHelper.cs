@@ -66,6 +66,45 @@ public static class ProcessHelper
             info.User = userHostMatch.Groups[1].Value;
             info.Host = userHostMatch.Groups[2].Value;
         }
+        else
+        {
+            // Fallback: try to extract host-only pattern (e.g., "ssh soon-nixos")
+            // Check for -l option for user
+            var lOptionMatch = Regex.Match(commandLine, @"-l\s+(\S+)");
+            if (lOptionMatch.Success)
+            {
+                info.User = lOptionMatch.Groups[1].Value;
+            }
+
+            // Extract host: look for ssh command followed by a hostname
+            // Match: ssh [options] hostname [command]
+            // Options with values: -l, -o, -i, -p, -F, -J, -W, -b, -c, -D, -E, -e, -I, -L, -m, -O, -Q, -R, -S, -w
+            var sshMatch = Regex.Match(commandLine, @"ssh(?:\.exe)?""?\s+(.+)", RegexOptions.IgnoreCase);
+            if (sshMatch.Success)
+            {
+                var args = sshMatch.Groups[1].Value;
+                // Skip options and their values to find the host
+                var optionsWithValues = new HashSet<string> { "-l", "-o", "-i", "-p", "-F", "-J", "-W", "-b", "-c", "-D", "-E", "-e", "-I", "-L", "-m", "-O", "-Q", "-R", "-S", "-w" };
+                var parts = Regex.Matches(args, @"(?:""[^""]*""|\S)+").Cast<Match>().Select(m => m.Value).ToList();
+
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    var part = parts[i];
+                    if (part.StartsWith("-"))
+                    {
+                        // Check if this option takes a value
+                        if (optionsWithValues.Contains(part) && i + 1 < parts.Count)
+                        {
+                            i++; // Skip the value
+                        }
+                        continue;
+                    }
+                    // First non-option argument is the host
+                    info.Host = part.Trim('"');
+                    break;
+                }
+            }
+        }
 
         // Extract git command (git-upload-pack for fetch/clone, git-receive-pack for push)
         if (commandLine.Contains("git-upload-pack"))

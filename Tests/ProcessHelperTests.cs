@@ -269,6 +269,52 @@ public class ParseSshCommandLineTests
 
     #endregion
 
+    #region Host-Only Extraction (no user@)
+
+    [Fact]
+    public void ParseSshCommandLine_HostOnly_ExtractsHost()
+    {
+        var result = ProcessHelper.ParseSshCommandLine("ssh soon-nixos");
+        Assert.NotNull(result);
+        Assert.Equal("soon-nixos", result.Host);
+        Assert.Null(result.User);
+    }
+
+    [Fact]
+    public void ParseSshCommandLine_HostOnlyWithOptions_ExtractsHost()
+    {
+        var result = ProcessHelper.ParseSshCommandLine("ssh -o StrictHostKeyChecking=no soon-nixos");
+        Assert.NotNull(result);
+        Assert.Equal("soon-nixos", result.Host);
+    }
+
+    [Fact]
+    public void ParseSshCommandLine_HostOnlyWithLOption_ExtractsUserAndHost()
+    {
+        var result = ProcessHelper.ParseSshCommandLine("ssh -l soon soon-nixos");
+        Assert.NotNull(result);
+        Assert.Equal("soon-nixos", result.Host);
+        Assert.Equal("soon", result.User);
+    }
+
+    [Fact]
+    public void ParseSshCommandLine_HostOnlyWithMultipleOptions_ExtractsHost()
+    {
+        var result = ProcessHelper.ParseSshCommandLine("ssh -p 22 -i ~/.ssh/id_rsa soon-nixos");
+        Assert.NotNull(result);
+        Assert.Equal("soon-nixos", result.Host);
+    }
+
+    [Fact]
+    public void ParseSshCommandLine_HostOnlyQuotedPath_ExtractsHost()
+    {
+        var result = ProcessHelper.ParseSshCommandLine("\"C:\\Windows\\System32\\OpenSSH\\ssh.exe\" soon-nixos");
+        Assert.NotNull(result);
+        Assert.Equal("soon-nixos", result.Host);
+    }
+
+    #endregion
+
     #region Git Command Extraction
 
     [Fact]
