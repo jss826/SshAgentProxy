@@ -2,6 +2,8 @@ using SshAgentProxy;
 using SshAgentProxy.UI;
 
 // Command line arguments (processed before mutex check)
+bool startMinimized = args.Contains("--minimized") || args.Contains("-m");
+
 if (args.Length > 0)
 {
     switch (args[0])
@@ -27,6 +29,8 @@ if (args.Length > 0)
             Console.WriteLine();
             Console.WriteLine("Options:");
             Console.WriteLine("  (none)        Start the proxy server");
+            Console.WriteLine("  --minimized   Start minimized to system tray");
+            Console.WriteLine("  -m            Same as --minimized");
             Console.WriteLine("  --uninstall   Remove SSH_AUTH_SOCK from user environment");
             Console.WriteLine("  --reset       Same as --uninstall");
             Console.WriteLine("  --help, -h    Show this help");
@@ -112,32 +116,50 @@ Console.CancelKeyPress += (_, e) =>
     cts.Cancel();
 };
 
+// Create tray icon
+using var trayIcon = new TrayIcon(versionStr);
+trayIcon.OnSwitchAgent += proxy.SwitchToAsync;
+trayIcon.OnRescanKeys += proxy.ScanKeysAsync;
+trayIcon.OnExit += () => cts.Cancel();
+trayIcon.UpdateHostMappingsMenu(config.HostKeyMappings);
+
 await proxy.StartAsync(cts.Token);
 
-try
+// Start key input handler on a dedicated thread
+Thread? keyInputThread = null;
+if (consoleAvailable && ui != null)
 {
-    if (consoleAvailable && ui != null)
+    keyInputThread = new Thread(() =>
     {
         while (!cts.Token.IsCancellationRequested)
         {
-            if (Console.KeyAvailable)
+            try
             {
+                // Poll for key availability
+                if (!Console.KeyAvailable)
+                {
+                    Thread.Sleep(50);
+                    continue;
+                }
+
                 var key = Console.ReadKey(intercept: true);
+
                 switch (key.KeyChar)
                 {
                     case '1':
-                        await proxy.SwitchToAsync("1Password", cts.Token);
+                        _ = proxy.SwitchToAsync("1Password", cts.Token);
                         break;
                     case '2':
-                        await proxy.SwitchToAsync("Bitwarden", cts.Token);
+                        _ = proxy.SwitchToAsync("Bitwarden", cts.Token);
                         break;
                     case 'r':
                     case 'R':
-                        await proxy.ScanKeysAsync(cts.Token);
+                        _ = proxy.ScanKeysAsync(cts.Token);
                         break;
                     case 'h':
                     case 'H':
                         ui.ShowHostMappings(config.HostKeyMappings);
+                        trayIcon.UpdateHostMappingsMenu(config.HostKeyMappings);
                         break;
                     case 'd':
                     case 'D':
@@ -148,11 +170,16 @@ try
                             config.HostKeyMappings.RemoveAt(indexToDelete.Value);
                             config.Save();
                             ui.Log($"Deleted: {removed.Pattern}");
+                            trayIcon.UpdateHostMappingsMenu(config.HostKeyMappings);
                         }
                         break;
                     case 'c':
                     case 'C':
                         ui.Refresh();
+                        break;
+                    case 't':
+                    case 'T':
+                        trayIcon.ToggleConsole();
                         break;
                     case 'q':
                     case 'Q':
@@ -160,14 +187,20 @@ try
                         break;
                 }
             }
-            await Task.Delay(100, cts.Token);
+            catch
+            {
+                break;
+            }
         }
-    }
-    else
-    {
-        // Wait indefinitely if no console
-        await Task.Delay(Timeout.Infinite, cts.Token);
-    }
+    });
+    keyInputThread.IsBackground = true;
+    keyInputThread.Start();
+}
+
+try
+{
+    // Wait for cancellation
+    await Task.Delay(Timeout.Infinite, cts.Token);
 }
 catch (OperationCanceledException)
 {

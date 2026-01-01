@@ -92,7 +92,19 @@ While running, you can use these keyboard shortcuts:
 - `r` - Rescan keys from all agents
 - `h` - Show host key mappings
 - `d` - Delete a host key mapping
+- `t` - Toggle console visibility (minimize to tray)
 - `q` - Quit
+
+### System Tray
+
+The application shows an icon in the system tray with a right-click menu:
+- Switch to 1Password / Bitwarden
+- Rescan Keys
+- Host Mappings (view current mappings)
+- Show/Hide Console
+- Exit
+
+Double-click the tray icon to toggle console visibility.
 
 ### Command Line Options
 
@@ -101,6 +113,8 @@ SshAgentProxy.exe [options]
 
 Options:
   (none)        Start the proxy server
+  --minimized   Start minimized to system tray
+  -m            Same as --minimized
   --uninstall   Remove SSH_AUTH_SOCK from user environment
   --reset       Same as --uninstall
   --help, -h    Show this help

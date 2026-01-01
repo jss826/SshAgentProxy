@@ -30,7 +30,7 @@ public class ConsoleUI
             $"Config: {configPath}",
             $"SSH_AUTH_SOCK: {sshAuthSock}",
             "",
-            "Commands: 1/2=switch  r=rescan  h=hosts  d=delete  q=quit",
+            "Commands: 1/2=switch  r=rescan  h=hosts  d=delete  t=tray  q=quit",
             new string('-', 60),
         };
 
