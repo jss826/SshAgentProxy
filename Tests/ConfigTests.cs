@@ -390,6 +390,109 @@ public class ConfigTests : IDisposable
 
     #endregion
 
+    #region HostKeyMapping Tests
+
+    [Fact]
+    public void HostKeyMappings_DefaultIsEmpty()
+    {
+        var config = new Config();
+        Assert.Empty(config.HostKeyMappings);
+    }
+
+    [Fact]
+    public void HostKeyMappings_CanBeAddedAndSaved()
+    {
+        // Arrange
+        var configPath = Path.Combine(_tempDir, "config.json");
+        var config = Config.LoadOrCreate(configPath);
+        config.HostKeyMappings.Add(new HostKeyMapping
+        {
+            Pattern = "github.com:myorg/*",
+            Fingerprint = "ABC123",
+            Description = "Work account"
+        });
+
+        // Act
+        config.Save();
+        var loaded = Config.LoadOrCreate(configPath);
+
+        // Assert
+        Assert.Single(loaded.HostKeyMappings);
+        Assert.Equal("github.com:myorg/*", loaded.HostKeyMappings[0].Pattern);
+        Assert.Equal("ABC123", loaded.HostKeyMappings[0].Fingerprint);
+        Assert.Equal("Work account", loaded.HostKeyMappings[0].Description);
+    }
+
+    [Fact]
+    public void HostKeyMappings_DescriptionCanBeNull()
+    {
+        // Arrange
+        var configPath = Path.Combine(_tempDir, "config.json");
+        File.WriteAllText(configPath, """
+        {
+            "hostKeyMappings": [
+                { "pattern": "github.com:*", "fingerprint": "ABC123" }
+            ]
+        }
+        """);
+
+        // Act
+        var config = Config.LoadOrCreate(configPath);
+
+        // Assert
+        Assert.Single(config.HostKeyMappings);
+        Assert.Equal("github.com:*", config.HostKeyMappings[0].Pattern);
+        Assert.Null(config.HostKeyMappings[0].Description);
+    }
+
+    [Fact]
+    public void HostKeyMappings_MultiplePatterns_PreserveOrder()
+    {
+        // Arrange
+        var configPath = Path.Combine(_tempDir, "config.json");
+        var config = Config.LoadOrCreate(configPath);
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:org1/*", Fingerprint = "KEY1" });
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:org2/*", Fingerprint = "KEY2" });
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:*", Fingerprint = "KEY3" });
+
+        // Act
+        config.Save();
+        var loaded = Config.LoadOrCreate(configPath);
+
+        // Assert
+        Assert.Equal(3, loaded.HostKeyMappings.Count);
+        Assert.Equal("github.com:org1/*", loaded.HostKeyMappings[0].Pattern);
+        Assert.Equal("github.com:org2/*", loaded.HostKeyMappings[1].Pattern);
+        Assert.Equal("github.com:*", loaded.HostKeyMappings[2].Pattern);
+    }
+
+    [Fact]
+    public void KeySelectionTimeoutSeconds_DefaultIs30()
+    {
+        var config = new Config();
+        Assert.Equal(30, config.KeySelectionTimeoutSeconds);
+    }
+
+    [Fact]
+    public void KeySelectionTimeoutSeconds_CanBeCustomized()
+    {
+        // Arrange
+        var configPath = Path.Combine(_tempDir, "config.json");
+        File.WriteAllText(configPath, """
+        {
+            "keySelectionTimeoutSeconds": 60
+        }
+        """);
+
+        // Act
+        var config = Config.LoadOrCreate(configPath);
+
+        // Assert
+        Assert.Equal(60, config.KeySelectionTimeoutSeconds);
+    }
+
+    #endregion
+
     #region JSON Serialization Tests
 
     [Fact]
