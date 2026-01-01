@@ -1,16 +1,10 @@
 using SshAgentProxy;
 
-// Command line arguments
+// Command line arguments (processed before mutex check)
 if (args.Length > 0)
 {
     switch (args[0])
     {
-        case "--test-switch":
-            var targetAgent = args.Length > 1 ? args[1] : "1Password";
-            var force = args.Contains("--force");
-            await TestSwitchAsync(targetAgent, force);
-            return;
-
         case "--uninstall":
         case "--reset":
             var current = Environment.GetEnvironmentVariable("SSH_AUTH_SOCK", EnvironmentVariableTarget.User);
@@ -37,6 +31,26 @@ if (args.Length > 0)
             Console.WriteLine("  --help, -h    Show this help");
             return;
     }
+}
+
+// Prevent multiple instances using a named mutex
+const string mutexName = "Global\\SshAgentProxy_SingleInstance";
+using var mutex = new Mutex(true, mutexName, out bool createdNew);
+
+if (!createdNew)
+{
+    Console.WriteLine("Error: SshAgentProxy is already running.");
+    Console.WriteLine("Only one instance is allowed.");
+    Environment.Exit(1);
+}
+
+// Handle --test-switch after mutex check (it starts a proxy)
+if (args.Length > 0 && args[0] == "--test-switch")
+{
+    var targetAgent = args.Length > 1 ? args[1] : "1Password";
+    var force = args.Contains("--force");
+    await TestSwitchAsync(targetAgent, force);
+    return;
 }
 
 Console.WriteLine("╔══════════════════════════════════════╗");
