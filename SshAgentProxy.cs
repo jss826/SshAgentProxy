@@ -370,6 +370,46 @@ public class SshAgentProxyService : IAsyncDisposable
         StartProcessIfNeeded(agent.ProcessName, agent.ExePath);
         await Task.Delay(3000, ct);
         _currentAgent = agentName;
+
+        // Trigger unlock prompt by requesting identities
+        // Bitwarden shows unlock dialog on RequestIdentities, not on SignRequest
+        await TriggerAgentUnlockAsync(agentName, ct);
+    }
+
+    /// <summary>
+    /// Trigger agent unlock by sending RequestIdentities.
+    /// Bitwarden shows unlock dialog on RequestIdentities, not on SignRequest.
+    /// </summary>
+    private async Task TriggerAgentUnlockAsync(string agentName, CancellationToken ct)
+    {
+        Log($"  Triggering {agentName} unlock prompt...");
+
+        for (int retry = 0; retry < 10; retry++)
+        {
+            using var client = await ConnectToBackendAsync(ct);
+            if (client == null)
+            {
+                await Task.Delay(1000, ct);
+                continue;
+            }
+
+            try
+            {
+                var keys = await client.RequestIdentitiesAsync(ct);
+                if (keys.Count > 0)
+                {
+                    Log($"    {agentName} unlocked, {keys.Count} keys available");
+                    return;
+                }
+                Log($"    Waiting for unlock... ({retry + 1}/10)");
+            }
+            catch (Exception ex)
+            {
+                Log($"    Error: {ex.Message}");
+            }
+            await Task.Delay(2000, ct);
+        }
+        Log($"    {agentName} unlock timeout");
     }
 
     /// <summary>

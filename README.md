@@ -26,7 +26,7 @@ SSH Agent Proxy creates its own named pipe (`\\.\pipe\ssh-agent-proxy`) and acts
 
 - Automatic agent switching based on key fingerprint
 - Merged key listing from all configured agents
-- Auto-configures `SSH_AUTH_SOCK` environment variable (restored on exit)
+- Auto-configures `SSH_AUTH_SOCK` environment variable
 - No manual intervention needed after initial setup
 - Persists key-to-agent mappings for faster subsequent operations
 - Minimizes agent restarts by detecting current agent from existing pipe
@@ -75,9 +75,14 @@ SshAgentProxy.exe
 ```
 
 On startup, it will:
-- Set `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` in user environment variables (restored on exit)
+- Set `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` in user environment variables
 - Create a config file at `%APPDATA%\SshAgentProxy\config.json` (if not exists)
 - Start listening for SSH agent requests
+
+**Important**: The proxy modifies the `SSH_AUTH_SOCK` environment variable permanently. While the proxy is not running, SSH operations will fail because the configured pipe doesn't exist. To restore normal SSH agent behavior:
+- Run `SshAgentProxy.exe --uninstall` to remove it permanently
+- Or in PowerShell: `[Environment]::SetEnvironmentVariable("SSH_AUTH_SOCK", $null, "User")`
+- For current session only: `Remove-Item Env:SSH_AUTH_SOCK`
 
 ### Interactive Commands
 
@@ -101,13 +106,13 @@ Options:
 
 ### Uninstalling
 
-The proxy automatically restores `SSH_AUTH_SOCK` to its original value when it exits normally. For permanent removal:
+The proxy does **not** restore `SSH_AUTH_SOCK` on exit. This is intentional—it allows you to restart the proxy without affecting existing terminals. To restore normal SSH agent behavior:
 
 ```
 SshAgentProxy.exe --uninstall
 ```
 
-This removes `SSH_AUTH_SOCK` from user environment variables. New terminals will use the default Windows OpenSSH agent.
+This removes `SSH_AUTH_SOCK` from user environment variables. New terminals will use the default Windows OpenSSH agent (or whichever agent owns the `openssh-ssh-agent` pipe).
 
 ## Configuration
 
@@ -185,7 +190,8 @@ SSH Client → Proxy → Check key mapping → Switch agent if needed → Wait f
 When switching agents:
 1. Kill current agent process (releases the pipe)
 2. Start target agent (acquires the pipe)
-3. Wait for user authentication if needed (up to ~15 seconds)
+3. Trigger unlock prompt via key listing request (Bitwarden requires this)
+4. Wait for user authentication if needed (up to ~30 seconds)
 
 ### Terminology
 
@@ -199,12 +205,14 @@ The proxy's strategy is optimized based on observed differences between 1Passwor
 | Behavior | 1Password | Bitwarden |
 |----------|-----------|-----------|
 | Key listing when locked | Returns keys | Requires unlock |
+| Unlock prompt trigger | On sign request | On key listing only |
 | Pipe acquisition on start | Takes if available | Steals even if taken |
 | After other agent exits | Does not auto-acquire | Does not auto-acquire |
 
 **Implications:**
 
 - **Bitwarden unlock prompts**: Querying Bitwarden (even just listing keys) triggers an unlock prompt. The proxy minimizes Bitwarden interactions by using cached key mappings and process detection instead of pipe queries.
+- **Agent switching requires key listing first**: Because Bitwarden only shows the unlock prompt on key listing (not on sign requests), the proxy must send a key listing request after switching to Bitwarden to trigger the unlock dialog before attempting to sign.
 - **Pipe ownership detection**: Instead of querying the pipe (which would trigger Bitwarden unlock), the proxy infers ownership from process state:
   - Both running → Bitwarden owns the pipe (because it steals on start)
   - Only 1Password running → Check pipe with a lightweight scan (1Password responds without unlock); if no response, pipe may be orphaned
