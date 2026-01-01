@@ -334,6 +334,7 @@ public class SshAgentProxyService : IAsyncDisposable
         if (agent == null)
         {
             Log($"Warning: Agent '{agentName}' not configured");
+            Log($"  → Add it to 'agents' in config: {_config.ConfigPath}");
             return;
         }
 
@@ -369,6 +370,7 @@ public class SshAgentProxyService : IAsyncDisposable
         if (primary == null)
         {
             Log($"Warning: Agent '{agentName}' not configured");
+            Log($"  → Add it to 'agents' in config: {_config.ConfigPath}");
             return;
         }
 
@@ -468,6 +470,7 @@ public class SshAgentProxyService : IAsyncDisposable
         if (agent == null)
         {
             Log($"    {agentName}: not configured");
+            Log($"    → Add it to 'agents' in config: {_config.ConfigPath}");
             return;
         }
 
@@ -527,6 +530,7 @@ public class SshAgentProxyService : IAsyncDisposable
         if (agent == null)
         {
             Log($"    {agentName}: not configured");
+            Log($"    → Add it to 'agents' in config: {_config.ConfigPath}");
             return;
         }
 
@@ -842,6 +846,7 @@ public class SshAgentProxyService : IAsyncDisposable
         if (isFullPath && !File.Exists(exePath))
         {
             Log($"  Warning: {exePath} not found");
+            Log($"  → Check 'exePath' in config: {_config.ConfigPath}");
             return;
         }
 

@@ -45,10 +45,12 @@ Console.WriteLine("║     1Password / Bitwarden Switcher   ║");
 Console.WriteLine("╚══════════════════════════════════════╝");
 Console.WriteLine();
 
-// Set SSH_AUTH_SOCK user environment variable if not configured
+// Save original SSH_AUTH_SOCK value for restoration on exit
 var expectedSock = @"\\.\pipe\ssh-agent-proxy";
-var currentSock = Environment.GetEnvironmentVariable("SSH_AUTH_SOCK", EnvironmentVariableTarget.User);
-if (string.IsNullOrEmpty(currentSock) || currentSock != expectedSock)
+var originalSock = Environment.GetEnvironmentVariable("SSH_AUTH_SOCK", EnvironmentVariableTarget.User);
+
+// Set SSH_AUTH_SOCK user environment variable if not configured
+if (string.IsNullOrEmpty(originalSock) || originalSock != expectedSock)
 {
     Console.WriteLine($"Setting SSH_AUTH_SOCK environment variable...");
     Environment.SetEnvironmentVariable("SSH_AUTH_SOCK", expectedSock, EnvironmentVariableTarget.User);
@@ -58,7 +60,7 @@ if (string.IsNullOrEmpty(currentSock) || currentSock != expectedSock)
 }
 else
 {
-    Console.WriteLine($"SSH_AUTH_SOCK already configured: {currentSock}");
+    Console.WriteLine($"SSH_AUTH_SOCK already configured: {originalSock}");
     Console.WriteLine();
 }
 
@@ -145,6 +147,24 @@ catch (OperationCanceledException)
 
 Console.WriteLine();
 Console.WriteLine("Shutting down...");
+
+// Restore original SSH_AUTH_SOCK if we changed it
+var currentSockOnExit = Environment.GetEnvironmentVariable("SSH_AUTH_SOCK", EnvironmentVariableTarget.User);
+if (currentSockOnExit == expectedSock)
+{
+    if (string.IsNullOrEmpty(originalSock) || originalSock == expectedSock)
+    {
+        // Original was empty or same as proxy - remove it
+        Environment.SetEnvironmentVariable("SSH_AUTH_SOCK", null, EnvironmentVariableTarget.User);
+        Console.WriteLine("SSH_AUTH_SOCK removed (restored to default)");
+    }
+    else
+    {
+        // Restore the original value
+        Environment.SetEnvironmentVariable("SSH_AUTH_SOCK", originalSock, EnvironmentVariableTarget.User);
+        Console.WriteLine($"SSH_AUTH_SOCK restored to: {originalSock}");
+    }
+}
 
 // Test function
 async Task TestSwitchAsync(string targetAgent, bool force)
