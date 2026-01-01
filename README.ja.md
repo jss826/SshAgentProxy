@@ -136,7 +136,9 @@ SshAgentProxy.exe --uninstall
   },
   "keyMappings": [],
   "defaultAgent": "1Password",
-  "failureCacheTtlSeconds": 60
+  "failureCacheTtlSeconds": 60,
+  "keySelectionTimeoutSeconds": 30,
+  "hostKeyMappings": []
 }
 ```
 
@@ -158,13 +160,17 @@ Windows名前付きパイプインターフェースを使用する任意のSSH�
 
 ### キーマッピング
 
-キーマッピングは署名操作が成功すると自動的に保存されます。事前設定も可能です：
+キーマッピングは署名操作が成功すると自動的に保存されます。各SSHキーがどのエージェントに属するかを記録します：
 
 ```json
 {
   "keyMappings": [
-    { "fingerprint": "A1B2C3D4E5F6...", "agent": "1Password" },
-    { "comment": "work@company.com", "agent": "Bitwarden" }
+    {
+      "fingerprint": "EA001331370E2E00",
+      "keyBlob": "AAAAC3NzaC1lZDI1NTE5...",
+      "comment": "GitHubJss826",
+      "agent": "1Password"
+    }
   ]
 }
 ```
@@ -172,6 +178,51 @@ Windows名前付きパイプインターフェースを使用する任意のSSH�
 プロキシはこれらのマッピングを以下の目的で使用します：
 1. 起動時にバックエンドパイプを現在所有しているエージェントを検出
 2. 試行錯誤なしで署名リクエストを正しいエージェントに直接ルーティング
+3. 再スキャンなしで即時起動するためにキーデータをキャッシュ
+
+### ホストキーマッピング（マルチアカウント対応）
+
+**なぜ必要か？**
+
+同じホストに複数のSSHキーがある場合（例：個人用と仕事用のGitHubアカウント）、SSH認証が予期せず失敗することがあります：
+
+1. SSHクライアントがエージェントから利用可能なすべてのキーを要求
+2. プロキシが1PasswordとBitwarden両方のキーを返す
+3. SSHはリスト内の**最初のキー**を試行
+4. GitHubはそのキーを受け入れて**ユーザーA**として認証
+5. しかしリポジトリは**ユーザーB**のもの → 「Repository not found」エラー
+
+SSHエージェントプロトコルには接続先のホストやリポジトリの情報が含まれないため、プロキシは自動的にどのキーを使用すべきか判断できません。`hostKeyMappings` はホスト/オーナーの組み合わせごとに使用するキーを指定することで、この問題を解決します。
+
+**設定：**
+
+```json
+{
+  "hostKeyMappings": [
+    {
+      "pattern": "github.com:work-org/*",
+      "fingerprint": "47F3BBD5AE0DC51D",
+      "description": "仕事用GitHubアカウント"
+    },
+    {
+      "pattern": "github.com:*",
+      "fingerprint": "EA001331370E2E00",
+      "description": "個人用GitHubアカウント"
+    }
+  ]
+}
+```
+
+**パターン形式：**
+- `github.com:owner/*` - 特定のオーナー/組織下のリポジトリにマッチ
+- `github.com:*` - ホスト上のすべてのリポジトリにマッチ（フォールバック）
+- パターンは順番に評価され、最初にマッチしたものが使用される
+
+**動作の仕組み：**
+
+プロキシはSSHクライアントプロセスのコマンドラインを検査して、接続先のホストとリポジトリを検出します（例：`ssh git@github.com git-upload-pack 'owner/repo.git'`）。マッチするパターンが見つかると、対応するキーが優先されます。
+
+**自動学習：** プロキシがどのキーを使用すべきか判断できない場合（マッチするパターンがない場合）、選択ダイアログを表示します。キーを選択すると、マッピングが自動的に `hostKeyMappings` に保存されます。ダイアログには設定可能なタイムアウト（`keySelectionTimeoutSeconds`、デフォルト30秒）があり、タイムアウト後は最初のキーが自動選択されます。
 
 ## 動作の仕組み
 

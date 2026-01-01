@@ -136,7 +136,9 @@ The config file is located at `%APPDATA%\SshAgentProxy\config.json`:
   },
   "keyMappings": [],
   "defaultAgent": "1Password",
-  "failureCacheTtlSeconds": 60
+  "failureCacheTtlSeconds": 60,
+  "keySelectionTimeoutSeconds": 30,
+  "hostKeyMappings": []
 }
 ```
 
@@ -158,13 +160,17 @@ The `priority` field determines the order in which agents are tried when searchi
 
 ### Key Mappings
 
-Key mappings are automatically saved when a successful signing operation occurs. You can also pre-configure mappings:
+Key mappings are automatically saved when a successful signing operation occurs. These mappings store which agent owns each SSH key:
 
 ```json
 {
   "keyMappings": [
-    { "fingerprint": "A1B2C3D4E5F6...", "agent": "1Password" },
-    { "comment": "work@company.com", "agent": "Bitwarden" }
+    {
+      "fingerprint": "EA001331370E2E00",
+      "keyBlob": "AAAAC3NzaC1lZDI1NTE5...",
+      "comment": "GitHubJss826",
+      "agent": "1Password"
+    }
   ]
 }
 ```
@@ -172,6 +178,51 @@ Key mappings are automatically saved when a successful signing operation occurs.
 The proxy uses these mappings to:
 1. Detect which agent currently owns the backend pipe on startup
 2. Route signing requests directly to the correct agent without trial-and-error
+3. Cache key data for instant startup without rescanning
+
+### Host Key Mappings (Multi-Account Support)
+
+**Why is this needed?**
+
+When you have multiple SSH keys for the same host (e.g., personal and work GitHub accounts), SSH authentication can fail unexpectedly:
+
+1. SSH client requests all available keys from the agent
+2. The proxy returns keys from both 1Password and Bitwarden
+3. SSH tries the **first key** in the list
+4. GitHub accepts the key and authenticates you as **User A**
+5. But the repository belongs to **User B** → "Repository not found" error
+
+The SSH agent protocol doesn't include information about which host or repository you're connecting to, so the proxy cannot automatically determine which key to use. `hostKeyMappings` solves this by letting you specify which key to use for each host/owner combination.
+
+**Configuration:**
+
+```json
+{
+  "hostKeyMappings": [
+    {
+      "pattern": "github.com:work-org/*",
+      "fingerprint": "47F3BBD5AE0DC51D",
+      "description": "Work GitHub account"
+    },
+    {
+      "pattern": "github.com:*",
+      "fingerprint": "EA001331370E2E00",
+      "description": "Personal GitHub account"
+    }
+  ]
+}
+```
+
+**Pattern format:**
+- `github.com:owner/*` - Match repositories under a specific owner/organization
+- `github.com:*` - Match all repositories on the host (fallback)
+- Patterns are evaluated in order; first match wins
+
+**How it works:**
+
+The proxy detects the target host and repository by inspecting the SSH client process's command line (e.g., `ssh git@github.com git-upload-pack 'owner/repo.git'`). When a matching pattern is found, the corresponding key is prioritized.
+
+**Auto-learning:** When the proxy cannot determine which key to use (no matching pattern), it shows a selection dialog. After you select a key, the mapping is automatically saved to `hostKeyMappings`. The dialog has a configurable timeout (`keySelectionTimeoutSeconds`, default 30) after which it auto-selects the first key.
 
 ## How It Works
 

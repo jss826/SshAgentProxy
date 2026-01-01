@@ -8,7 +8,7 @@ namespace SshAgentProxy.Pipes;
 public class NamedPipeAgentServer : IDisposable
 {
     private readonly string _pipeName;
-    private readonly Func<SshAgentMessage, CancellationToken, Task<SshAgentMessage>> _handler;
+    private readonly Func<SshAgentMessage, ClientContext, CancellationToken, Task<SshAgentMessage>> _handler;
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
 
@@ -16,7 +16,7 @@ public class NamedPipeAgentServer : IDisposable
 
     public event Action<string>? OnLog;
 
-    public NamedPipeAgentServer(string pipeName, Func<SshAgentMessage, CancellationToken, Task<SshAgentMessage>> handler)
+    public NamedPipeAgentServer(string pipeName, Func<SshAgentMessage, ClientContext, CancellationToken, Task<SshAgentMessage>> handler)
     {
         _pipeName = pipeName;
         _handler = handler;
@@ -68,9 +68,10 @@ public class NamedPipeAgentServer : IDisposable
 
                 Log("Waiting for connection...");
                 await pipe.WaitForConnectionAsync(ct);
-                Log($"Client connected (PID: {GetClientProcessId(pipe)})");
+                var clientPid = GetClientProcessId(pipe);
+                Log($"Client connected (PID: {clientPid})");
 
-                _ = HandleClientAsync(pipe, ct);
+                _ = HandleClientAsync(pipe, clientPid, ct);
             }
             catch (OperationCanceledException)
             {
@@ -86,8 +87,10 @@ public class NamedPipeAgentServer : IDisposable
         Log("Server stopped");
     }
 
-    private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
+    private async Task HandleClientAsync(NamedPipeServerStream pipe, int clientPid, CancellationToken ct)
     {
+        var context = new ClientContext(clientPid);
+
         try
         {
             while (pipe.IsConnected && !ct.IsCancellationRequested)
@@ -101,7 +104,7 @@ public class NamedPipeAgentServer : IDisposable
 
                 Log($"Received: {request.Value.Type}");
 
-                var response = await _handler(request.Value, ct);
+                var response = await _handler(request.Value, context, ct);
                 await SshAgentProtocol.WriteMessageAsync(pipe, response, ct);
 
                 Log($"Sent: {response.Type}");
@@ -138,5 +141,33 @@ public class NamedPipeAgentServer : IDisposable
     {
         _cts?.Cancel();
         _cts?.Dispose();
+    }
+}
+
+/// <summary>
+/// Context information about the connected client
+/// </summary>
+public class ClientContext
+{
+    public int ProcessId { get; }
+    public SshConnectionInfo? ConnectionInfo { get; private set; }
+    private bool _connectionInfoResolved;
+
+    public ClientContext(int processId)
+    {
+        ProcessId = processId;
+    }
+
+    /// <summary>
+    /// Get SSH connection info (lazy-loaded and cached)
+    /// </summary>
+    public SshConnectionInfo? GetConnectionInfo()
+    {
+        if (!_connectionInfoResolved)
+        {
+            ConnectionInfo = ProcessHelper.GetSshConnectionInfo(ProcessId);
+            _connectionInfoResolved = true;
+        }
+        return ConnectionInfo;
     }
 }

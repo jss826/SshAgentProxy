@@ -1,7 +1,7 @@
 using System.Diagnostics;
-using System.Linq;
 using SshAgentProxy.Pipes;
 using SshAgentProxy.Protocol;
+using SshAgentProxy.UI;
 
 namespace SshAgentProxy;
 
@@ -492,7 +492,7 @@ public class SshAgentProxyService : IAsyncDisposable
         Log($"Switched to {agentName}");
     }
 
-    private async Task<SshAgentMessage> HandleRequestAsync(SshAgentMessage request, CancellationToken ct)
+    private async Task<SshAgentMessage> HandleRequestAsync(SshAgentMessage request, ClientContext context, CancellationToken ct)
     {
         // Acquire lock for thread safety (multiple clients can connect concurrently)
         await _stateLock.WaitAsync(ct);
@@ -500,7 +500,7 @@ public class SshAgentProxyService : IAsyncDisposable
         {
             return request.Type switch
             {
-                SshAgentMessageType.SSH_AGENTC_REQUEST_IDENTITIES => await HandleRequestIdentitiesAsync(ct),
+                SshAgentMessageType.SSH_AGENTC_REQUEST_IDENTITIES => await HandleRequestIdentitiesAsync(context, ct),
                 SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST => await HandleSignRequestAsync(request.Payload, ct),
                 _ => await ForwardRequestAsync(request, ct),
             };
@@ -511,39 +511,119 @@ public class SshAgentProxyService : IAsyncDisposable
         }
     }
 
-    private Task<SshAgentMessage> HandleRequestIdentitiesAsync(CancellationToken ct)
+    private async Task<SshAgentMessage> HandleRequestIdentitiesAsync(ClientContext context, CancellationToken ct)
     {
         Log("Request: List identities");
 
+        List<SshIdentity> keysToReturn;
+
         if (_keysScanned && _allKeys.Count > 0)
         {
-            // Return merged keys if already scanned
-            Log($"  Returning {_allKeys.Count} merged keys");
-            foreach (var id in _allKeys)
-            {
-                var agent = _keyToAgent.TryGetValue(id.Fingerprint, out var a) ? a : "?";
-                Log($"    [{agent}] {id.Comment} ({id.Fingerprint})");
-            }
-            return Task.FromResult(SshAgentMessage.IdentitiesAnswer(_allKeys));
+            keysToReturn = new List<SshIdentity>(_allKeys);
+        }
+        else
+        {
+            // Scan all agents to build complete key list (needed for first run)
+            await ScanAllAgentsAsync(ct);
+            keysToReturn = new List<SshIdentity>(_allKeys);
         }
 
-        // If not scanned yet, get keys from backend
-        return HandleRequestIdentitiesFromBackendAsync(ct);
-    }
-
-    private async Task<SshAgentMessage> HandleRequestIdentitiesFromBackendAsync(CancellationToken ct)
-    {
-        // Scan all agents to build complete key list (needed for first run)
-        await ScanAllAgentsAsync(ct);
-
-        if (_allKeys.Count == 0)
+        if (keysToReturn.Count == 0)
         {
             Log("  No keys found from any agent");
             return SshAgentMessage.Failure();
         }
 
-        Log($"  Returning {_allKeys.Count} keys from all agents");
-        return SshAgentMessage.IdentitiesAnswer(_allKeys);
+        // Try to get SSH connection info for smart key selection
+        var connectionInfo = context.GetConnectionInfo();
+        string? matchedFingerprint = null;
+
+        if (connectionInfo != null)
+        {
+            Log($"  Detected connection: {connectionInfo}");
+
+            // Check hostKeyMappings for a matching pattern
+            foreach (var mapping in _config.HostKeyMappings)
+            {
+                if (connectionInfo.MatchesPattern(mapping.Pattern))
+                {
+                    Log($"  Matched pattern: {mapping.Pattern} -> {mapping.Fingerprint}");
+                    matchedFingerprint = mapping.Fingerprint;
+                    break;
+                }
+            }
+
+            // If we found a matching key, prioritize it (move to front)
+            if (matchedFingerprint != null)
+            {
+                var matchedKey = keysToReturn.FirstOrDefault(k => k.Fingerprint == matchedFingerprint);
+                if (matchedKey != null)
+                {
+                    keysToReturn.Remove(matchedKey);
+                    keysToReturn.Insert(0, matchedKey);
+                    Log($"  Prioritized key: {matchedKey.Comment} ({matchedKey.Fingerprint})");
+                }
+            }
+        }
+        else
+        {
+            Log("  Could not detect connection info from client process");
+        }
+
+        // Show key selection dialog if no host pattern matched and multiple keys available
+        if (matchedFingerprint == null && keysToReturn.Count > 1)
+        {
+            Log($"  Showing key selection dialog ({keysToReturn.Count} keys available)...");
+
+            var selectedKeys = KeySelectionDialog.ShowDialog(
+                keysToReturn,
+                _keyToAgent,
+                _config.KeySelectionTimeoutSeconds);
+
+            if (selectedKeys != null && selectedKeys.Count > 0)
+            {
+                keysToReturn = selectedKeys;
+                Log($"  User selected {keysToReturn.Count} key(s)");
+
+                // Auto-save host key mapping if we have connection info
+                if (connectionInfo != null && selectedKeys.Count == 1)
+                {
+                    var selectedKey = selectedKeys[0];
+                    var owner = connectionInfo.GetOwner();
+                    var pattern = !string.IsNullOrEmpty(owner)
+                        ? $"{connectionInfo.Host}:{owner}/*"
+                        : $"{connectionInfo.Host}:*";
+
+                    // Check if this pattern already exists
+                    var existing = _config.HostKeyMappings.FirstOrDefault(m => m.Pattern == pattern);
+                    if (existing == null)
+                    {
+                        _config.HostKeyMappings.Add(new HostKeyMapping
+                        {
+                            Pattern = pattern,
+                            Fingerprint = selectedKey.Fingerprint,
+                            Description = $"Auto-saved: {selectedKey.Comment}"
+                        });
+                        _config.Save();
+                        Log($"  Saved host mapping: {pattern} -> {selectedKey.Fingerprint}");
+                    }
+                }
+            }
+            else
+            {
+                Log("  Dialog cancelled, returning all keys");
+            }
+        }
+
+        // Log what we're returning
+        Log($"  Returning {keysToReturn.Count} keys");
+        foreach (var id in keysToReturn)
+        {
+            var agent = _keyToAgent.TryGetValue(id.Fingerprint, out var a) ? a : "?";
+            Log($"    [{agent}] {id.Comment} ({id.Fingerprint})");
+        }
+
+        return SshAgentMessage.IdentitiesAnswer(keysToReturn);
     }
 
     /// <summary>

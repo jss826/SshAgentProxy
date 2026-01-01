@@ -42,6 +42,20 @@ public class Config
     [JsonPropertyName("failureCacheTtlSeconds")]
     public int FailureCacheTtlSeconds { get; set; } = 60;
 
+    /// <summary>
+    /// Timeout in seconds for key selection dialog (auto-selects first key on timeout)
+    /// </summary>
+    [JsonPropertyName("keySelectionTimeoutSeconds")]
+    public int KeySelectionTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Host/repo pattern to key fingerprint mappings for automatic key selection.
+    /// Patterns: "github.com:owner/*" or "github.com:*" or "gitlab.com:*"
+    /// Keys with matching patterns are prioritized (returned first in identity list).
+    /// </summary>
+    [JsonPropertyName("hostKeyMappings")]
+    public List<HostKeyMapping> HostKeyMappings { get; set; } = [];
+
     [JsonIgnore]
     public string? ConfigPath => _configPath;
 
@@ -136,4 +150,25 @@ public class KeyMapping
 
     [JsonPropertyName("agent")]
     public string Agent { get; set; } = "1Password";
+}
+
+public class HostKeyMapping
+{
+    /// <summary>
+    /// Pattern to match: "github.com:owner/*" or "github.com:*" or "host:*"
+    /// </summary>
+    [JsonPropertyName("pattern")]
+    public string Pattern { get; set; } = "";
+
+    /// <summary>
+    /// Key fingerprint to use for this pattern
+    /// </summary>
+    [JsonPropertyName("fingerprint")]
+    public string Fingerprint { get; set; } = "";
+
+    /// <summary>
+    /// Optional description for this mapping
+    /// </summary>
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
 }
