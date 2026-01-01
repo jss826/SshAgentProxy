@@ -53,8 +53,11 @@ if (args.Length > 0 && args[0] == "--test-switch")
     return;
 }
 
+var version = typeof(SshAgentProxyService).Assembly.GetName().Version;
+var versionStr = version != null ? $"v{version.Major}.{version.Minor}.{version.Build}" : "";
+
 Console.WriteLine("+--------------------------------------+");
-Console.WriteLine("|     SSH Agent Proxy                  |");
+Console.WriteLine($"|     SSH Agent Proxy {versionStr,-17}|");
 Console.WriteLine("|     1Password / Bitwarden Switcher   |");
 Console.WriteLine("+--------------------------------------+");
 Console.WriteLine();
