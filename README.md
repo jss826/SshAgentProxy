@@ -24,7 +24,7 @@ SSH Agent Proxy creates its own named pipe (`\\.\pipe\ssh-agent-proxy`) and acts
 
 - Automatic agent switching based on key fingerprint
 - Merged key listing from all configured agents
-- Auto-configures `SSH_AUTH_SOCK` environment variable
+- Auto-configures `SSH_AUTH_SOCK` environment variable (restored on exit)
 - No manual intervention needed after initial setup
 - Persists key-to-agent mappings for faster subsequent operations
 - Minimizes agent restarts by detecting current agent from existing pipe
@@ -94,7 +94,7 @@ Options:
 
 ### Uninstalling
 
-To remove the proxy and restore default SSH agent behavior:
+The proxy automatically restores `SSH_AUTH_SOCK` to its original value when it exits normally. For permanent removal:
 
 ```
 SshAgentProxy.exe --uninstall
