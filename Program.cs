@@ -53,10 +53,10 @@ if (args.Length > 0 && args[0] == "--test-switch")
     return;
 }
 
-Console.WriteLine("╔══════════════════════════════════════╗");
-Console.WriteLine("║     SSH Agent Proxy                  ║");
-Console.WriteLine("║     1Password / Bitwarden Switcher   ║");
-Console.WriteLine("╚══════════════════════════════════════╝");
+Console.WriteLine("+--------------------------------------+");
+Console.WriteLine("|     SSH Agent Proxy                  |");
+Console.WriteLine("|     1Password / Bitwarden Switcher   |");
+Console.WriteLine("+--------------------------------------+");
 Console.WriteLine();
 
 var expectedSock = @"\\.\pipe\ssh-agent-proxy";
