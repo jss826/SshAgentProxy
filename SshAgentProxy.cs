@@ -28,11 +28,13 @@ public class SshAgentProxyService : IAsyncDisposable
         _server.OnLog += msg => OnLog?.Invoke(msg);
 
         // Load key mappings from config (including cached key data)
+        var agentsInMappings = new HashSet<string>();
         foreach (var mapping in config.KeyMappings)
         {
             if (!string.IsNullOrEmpty(mapping.Fingerprint))
             {
                 _keyToAgent[mapping.Fingerprint] = mapping.Agent;
+                agentsInMappings.Add(mapping.Agent);
 
                 // If we have full key data, add to cached keys
                 if (!string.IsNullOrEmpty(mapping.KeyBlob))
@@ -50,8 +52,9 @@ public class SshAgentProxyService : IAsyncDisposable
             }
         }
 
-        // If we loaded cached keys, mark as scanned
-        if (_allKeys.Count > 0)
+        // If keyMappings reference 2+ different agents, we have sufficient data
+        // Skip initial scan to avoid unnecessary Bitwarden unlock prompts
+        if (agentsInMappings.Count >= 2)
             _keysScanned = true;
     }
 
@@ -72,8 +75,13 @@ public class SshAgentProxyService : IAsyncDisposable
             }
         }
 
-        // Try to detect current agent from existing pipe
-        await DetectCurrentAgentAsync(ct);
+        if (_keysScanned)
+        {
+            Log("Skipping initial scan (keyMappings have 2+ agents)");
+        }
+
+        // Detect current agent from running processes (avoids Bitwarden unlock prompt)
+        DetectCurrentAgentFromProcesses();
 
         _server.Start();
         Log("Proxy server started");
@@ -84,8 +92,47 @@ public class SshAgentProxyService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Detect current agent from running processes (no pipe query, avoids Bitwarden unlock).
+    /// Uses the heuristic: Bitwarden running = Bitwarden owns pipe (it steals on start).
+    /// </summary>
+    private void DetectCurrentAgentFromProcesses()
+    {
+        Log("Detecting current agent from processes...");
+
+        // Check which agents are running
+        var bitwardenConfig = GetAgentConfig("Bitwarden");
+        var onePasswordConfig = GetAgentConfig("1Password");
+
+        bool bitwardenRunning = bitwardenConfig != null &&
+            Process.GetProcessesByName(bitwardenConfig.ProcessName).Length > 0;
+        bool onePasswordRunning = onePasswordConfig != null &&
+            Process.GetProcessesByName(onePasswordConfig.ProcessName).Length > 0;
+
+        if (bitwardenRunning)
+        {
+            // Bitwarden steals the pipe on start, so it likely owns it
+            _currentAgent = "Bitwarden";
+            Log($"  Bitwarden is running - assuming it owns the pipe");
+        }
+        else if (onePasswordRunning)
+        {
+            // Only 1Password is running - it might have the pipe, or pipe might be orphaned
+            // We'll verify with a lightweight scan (1Password doesn't require unlock)
+            _currentAgent = "1Password";
+            Log($"  1Password is running - assuming it owns the pipe (will verify on first request)");
+        }
+        else
+        {
+            // Neither running - no one owns the pipe
+            _currentAgent = null;
+            Log($"  No agents running - pipe is available");
+        }
+    }
+
+    /// <summary>
     /// Quick detection of which agent owns the pipe based on key mappings.
     /// Used when _currentAgent becomes null (e.g., after background agent start).
+    /// Only used for 1Password (doesn't trigger unlock prompt).
     /// </summary>
     private async Task DetectCurrentAgentFromPipeAsync(CancellationToken ct)
     {
@@ -604,11 +651,8 @@ public class SshAgentProxyService : IAsyncDisposable
 
         Log($"Request: Sign with key {fingerprint}");
 
-        // Step 0: Re-detect current agent if unknown (may have changed due to background agent start)
-        if (_currentAgent == null)
-        {
-            await DetectCurrentAgentFromPipeAsync(ct);
-        }
+        // Step 0: Re-detect current agent from processes (avoids Bitwarden unlock)
+        DetectCurrentAgentFromProcesses();
 
         // Step 1: Determine target agent from mapping
         string? targetAgent = null;
@@ -642,6 +686,32 @@ public class SshAgentProxyService : IAsyncDisposable
                     _failureCache.ClearFailure(fingerprint, _currentAgent);
                     return SshAgentMessage.SignResponse(sig);
                 }
+
+                // Handle orphaned pipe scenario: 1Password running but doesn't have the pipe
+                // (happens when Bitwarden was running and exited)
+                if (result == SignResult.ConnectionFailed && _currentAgent == "1Password")
+                {
+                    Log($"  Pipe may be orphaned, restarting 1Password...");
+                    var agent = GetAgentConfig("1Password");
+                    if (agent != null)
+                    {
+                        await KillProcessAsync(agent.ProcessName);
+                        await Task.Delay(500, ct);
+                        StartProcessIfNeeded(agent.ProcessName, agent.ExePath);
+                        await Task.Delay(3000, ct);
+
+                        // Retry after restart
+                        (sig, result) = await TrySignAsync(keyBlob, data, flags, ct);
+                        if (sig != null)
+                        {
+                            Log($"  Signed by 1Password (after restart)");
+                            var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
+                            SaveKeyMapping(fingerprint, "1Password", keyBlob, comment);
+                            return SshAgentMessage.SignResponse(sig);
+                        }
+                    }
+                }
+
                 Log($"  Sign failed on current agent {_currentAgent}");
                 // Only cache connection failures, not sign refusals (user may authenticate on retry)
                 if (result == SignResult.ConnectionFailed)

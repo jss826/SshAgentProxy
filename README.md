@@ -42,20 +42,25 @@ SSH Agent Proxy creates its own named pipe (`\\.\pipe\ssh-agent-proxy`) and acts
 
 ## Installation
 
+### From Source
+
 1. Clone the repository:
    ```
    git clone https://github.com/jss826/SshAgentProxy.git
+   cd SshAgentProxy
    ```
 
-2. Build the project:
+2. Build and publish:
    ```
-   dotnet build
+   dotnet publish -c Release -o ./publish
    ```
 
 3. Run the proxy:
    ```
-   dotnet run
+   ./publish/SshAgentProxy.exe
    ```
+
+Optionally, add the `publish` folder to your PATH or copy the executable to a convenient location.
 
 The proxy will automatically set `SSH_AUTH_SOCK` in your user environment variables. New terminal windows will use the proxy automatically.
 
@@ -69,9 +74,9 @@ Simply run the application:
 SshAgentProxy.exe
 ```
 
-On first run, it will:
-- Set `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` in user environment variables
-- Create a config file at `%APPDATA%\SshAgentProxy\config.json`
+On startup, it will:
+- Set `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` in user environment variables (restored on exit)
+- Create a config file at `%APPDATA%\SshAgentProxy\config.json` (if not exists)
 - Start listening for SSH agent requests
 
 ### Interactive Commands

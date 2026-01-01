@@ -42,20 +42,25 @@ SSH Agent Proxyは独自の名前付きパイプ（`\\.\pipe\ssh-agent-proxy`）
 
 ## インストール
 
+### ソースから
+
 1. リポジトリをクローン：
    ```
    git clone https://github.com/jss826/SshAgentProxy.git
+   cd SshAgentProxy
    ```
 
-2. プロジェクトをビルド：
+2. ビルドして発行：
    ```
-   dotnet build
+   dotnet publish -c Release -o ./publish
    ```
 
 3. プロキシを実行：
    ```
-   dotnet run
+   ./publish/SshAgentProxy.exe
    ```
+
+任意で、`publish`フォルダをPATHに追加するか、実行ファイルを便利な場所にコピーしてください。
 
 プロキシはユーザー環境変数に `SSH_AUTH_SOCK` を自動設定します。新しいターミナルウィンドウは自動的にプロキシを使用します。
 
@@ -69,9 +74,9 @@ SSH Agent Proxyは独自の名前付きパイプ（`\\.\pipe\ssh-agent-proxy`）
 SshAgentProxy.exe
 ```
 
-初回実行時に：
-- ユーザー環境変数に `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` を設定
-- `%APPDATA%\SshAgentProxy\config.json` に設定ファイルを作成
+起動時に：
+- ユーザー環境変数に `SSH_AUTH_SOCK=\\.\pipe\ssh-agent-proxy` を設定（終了時に復元）
+- `%APPDATA%\SshAgentProxy\config.json` に設定ファイルを作成（なければ）
 - SSHエージェントリクエストの待ち受けを開始
 
 ### 対話コマンド
