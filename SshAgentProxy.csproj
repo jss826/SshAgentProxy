@@ -6,7 +6,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>3.0.1</Version>
+    <Version>3.1.0</Version>
     <AssemblyTitle>SSH Agent Proxy</AssemblyTitle>
     <Description>Windows SSH agent proxy that switches between 1Password and Bitwarden</Description>
   </PropertyGroup>

@@ -575,7 +575,9 @@ public class SshAgentProxyService : IAsyncDisposable
                 }
             }
 
-            // If we found a matching key, prioritize it (move to front)
+            // If we found a matching key, return ONLY that key
+            // This prevents the SSH client from falling through to keys from other agents
+            // when signing fails (e.g., 1Password sign fails → SSH client tries Bitwarden key)
             if (matchedFingerprint != null)
             {
                 // Use case-insensitive comparison for fingerprints
@@ -583,9 +585,8 @@ public class SshAgentProxyService : IAsyncDisposable
                     string.Equals(k.Fingerprint, matchedFingerprint, StringComparison.OrdinalIgnoreCase));
                 if (matchedKey != null)
                 {
-                    keysToReturn.Remove(matchedKey);
-                    keysToReturn.Insert(0, matchedKey);
-                    Log($"  Prioritized key: {matchedKey.Comment} ({matchedKey.Fingerprint})");
+                    keysToReturn = new List<SshIdentity> { matchedKey };
+                    Log($"  Selected key: {matchedKey.Comment} ({matchedKey.Fingerprint})");
                 }
             }
         }
@@ -822,6 +823,7 @@ public class SshAgentProxyService : IAsyncDisposable
 
         // Step 0: Re-detect current agent from processes (avoids Bitwarden unlock)
         DetectCurrentAgentFromProcesses();
+        var originalAgent = _currentAgent;
 
         // Step 1: Determine target agent from mapping
         string? targetAgent = null;
@@ -966,6 +968,15 @@ public class SshAgentProxyService : IAsyncDisposable
         else
         {
             Log($"  Key is mapped to {mappedAgent} - not trying other agents");
+        }
+
+        // Restore default agent after failed sign to leave system in working state
+        // (e.g., if we switched from 1Password to Bitwarden and Bitwarden failed)
+        var restoreAgent = originalAgent ?? _config.DefaultAgent;
+        if (restoreAgent != null && restoreAgent != _currentAgent)
+        {
+            Log($"  Restoring agent: {restoreAgent}");
+            await EnsureAgentRunningAsync(restoreAgent, ct);
         }
 
         Log("  Sign failed on target agent");
