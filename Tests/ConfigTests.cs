@@ -493,6 +493,84 @@ public class ConfigTests : IDisposable
 
     #endregion
 
+    #region HostKeyMapping Specificity Tests
+
+    [Theory]
+    [InlineData("github.com", 1)]
+    [InlineData("github.com:*", 1)]
+    [InlineData("gitlab.com:*", 1)]
+    [InlineData("github.com:owner/*", 2)]
+    [InlineData("github.com:myorg/*", 2)]
+    [InlineData("github.com:owner/repo", 3)]
+    [InlineData("github.com:owner/repo.git", 3)]
+    public void GetSpecificity_ReturnsCorrectScore(string pattern, int expectedScore)
+    {
+        Assert.Equal(expectedScore, HostKeyMapping.GetSpecificity(pattern));
+    }
+
+    [Fact]
+    public void HostKeyMappings_SpecificPatternMatchesFirst_RegardlessOfOrder()
+    {
+        // Arrange - catch-all pattern listed BEFORE specific pattern
+        var config = new Config();
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:*", Fingerprint = "CATCH_ALL" });
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:myorg/*", Fingerprint = "ORG_KEY" });
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:myorg/specific-repo", Fingerprint = "REPO_KEY" });
+
+        var connectionInfo = new SshConnectionInfo
+        {
+            Host = "github.com",
+            Repository = "myorg/specific-repo"
+        };
+
+        // Act - iterate in specificity order (same as SshAgentProxy does)
+        string? matched = null;
+        foreach (var mapping in config.HostKeyMappings
+            .OrderByDescending(m => HostKeyMapping.GetSpecificity(m.Pattern)))
+        {
+            if (connectionInfo.MatchesPattern(mapping.Pattern))
+            {
+                matched = mapping.Fingerprint;
+                break;
+            }
+        }
+
+        // Assert - exact repo match wins despite being last in the list
+        Assert.Equal("REPO_KEY", matched);
+    }
+
+    [Fact]
+    public void HostKeyMappings_OwnerWildcardBeatsHostWildcard()
+    {
+        // Arrange - catch-all first, owner-specific second
+        var config = new Config();
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:*", Fingerprint = "CATCH_ALL" });
+        config.HostKeyMappings.Add(new HostKeyMapping { Pattern = "github.com:sooooooooooon/*", Fingerprint = "OWNER_KEY" });
+
+        var connectionInfo = new SshConnectionInfo
+        {
+            Host = "github.com",
+            Repository = "sooooooooooon/some-repo"
+        };
+
+        // Act
+        string? matched = null;
+        foreach (var mapping in config.HostKeyMappings
+            .OrderByDescending(m => HostKeyMapping.GetSpecificity(m.Pattern)))
+        {
+            if (connectionInfo.MatchesPattern(mapping.Pattern))
+            {
+                matched = mapping.Fingerprint;
+                break;
+            }
+        }
+
+        // Assert - owner wildcard wins over host wildcard
+        Assert.Equal("OWNER_KEY", matched);
+    }
+
+    #endregion
+
     #region JSON Serialization Tests
 
     [Fact]

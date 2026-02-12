@@ -171,4 +171,20 @@ public class HostKeyMapping
     /// </summary>
     [JsonPropertyName("description")]
     public string? Description { get; set; }
+
+    /// <summary>
+    /// パターンの具体性スコアを返す（高い方が優先）
+    /// exact match (3) > owner wildcard (2) > host wildcard / host-only (1)
+    /// </summary>
+    public static int GetSpecificity(string pattern)
+    {
+        var parts = pattern.Split(':', 2);
+        if (parts.Length < 2 || parts[1] == "*")
+            return 1; // host-only or host:*
+
+        if (parts[1].EndsWith("/*"))
+            return 2; // owner wildcard (host:owner/*)
+
+        return 3; // exact match (host:owner/repo)
+    }
 }

@@ -564,8 +564,9 @@ public class SshAgentProxyService : IAsyncDisposable
         {
             Log($"  Detected connection: {connectionInfo}");
 
-            // Check hostKeyMappings for a matching pattern
-            foreach (var mapping in _config.HostKeyMappings)
+            // Check hostKeyMappings for a matching pattern (most specific pattern wins)
+            foreach (var mapping in _config.HostKeyMappings
+                .OrderByDescending(m => HostKeyMapping.GetSpecificity(m.Pattern)))
             {
                 if (connectionInfo.MatchesPattern(mapping.Pattern))
                 {
@@ -642,8 +643,8 @@ public class SshAgentProxyService : IAsyncDisposable
                             string.Equals(m.Pattern, pattern, StringComparison.OrdinalIgnoreCase));
                         if (existing == null)
                         {
-                            // Insert at the beginning so specific patterns take precedence over catch-all patterns
-                            _config.HostKeyMappings.Insert(0, new HostKeyMapping
+                            // Specificity-based auto-sort handles precedence; insertion order doesn't matter
+                            _config.HostKeyMappings.Add(new HostKeyMapping
                             {
                                 Pattern = pattern,
                                 Fingerprint = selectedKey.Fingerprint,
