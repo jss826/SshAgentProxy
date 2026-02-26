@@ -130,6 +130,45 @@ public class SshAgentProxyService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Detect pipe owner by querying backend keys and matching against key mappings.
+    /// Returns agent name or null if undetermined. No side effects on _currentAgent.
+    /// </summary>
+    private async Task<string?> DetectPipeOwnerFromKeysAsync(CancellationToken ct)
+    {
+        using var client = await ConnectToBackendAsync(ct);
+        if (client == null) return null;
+
+        try
+        {
+            var keys = await client.RequestIdentitiesAsync(ct);
+            if (keys.Count == 0) return null;
+
+            // Vote: which agent has the most keys in the pipe?
+            var votes = new Dictionary<string, int>();
+            foreach (var key in keys)
+            {
+                if (_keyToAgent.TryGetValue(key.Fingerprint, out var agent))
+                {
+                    votes.TryGetValue(agent, out var count);
+                    votes[agent] = count + 1;
+                }
+            }
+
+            if (votes.Count > 0)
+            {
+                var winner = votes.OrderByDescending(v => v.Value).First().Key;
+                Log($"  Pipe keys indicate owner: {winner} ({votes[winner]}/{keys.Count} keys matched)");
+                return winner;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"  Pipe owner detection failed: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Quick detection of which agent owns the pipe based on key mappings.
     /// Used when _currentAgent becomes null (e.g., after background agent start).
     /// Only used for 1Password (doesn't trigger unlock prompt).
@@ -348,28 +387,41 @@ public class SshAgentProxyService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Switch to agent for signing - kills current agent so target can take the pipe
+    /// Switch to agent for signing - kills current agent so target can take the pipe.
+    /// If the pipe is occupied by an unknown process, force-restarts the target agent.
     /// </summary>
     private async Task SwitchToAgentForSigningAsync(string agentName, CancellationToken ct)
     {
         var agent = GetAgentConfig(agentName);
         if (agent == null) return;
 
-        // Kill current agent only (not all agents) so target can take the pipe
-        if (_currentAgent != null && _currentAgent != agentName)
+        // Kill ALL known agents to release the pipe
+        foreach (var (name, config) in _config.GetAgentsByPriority())
         {
-            var currentConfig = GetAgentConfig(_currentAgent);
-            if (currentConfig != null)
-            {
-                await KillProcessAsync(currentConfig.ProcessName);
-                await Task.Delay(500, ct);
-            }
+            await KillProcessAsync(config.ProcessName);
+        }
+        await Task.Delay(1000, ct);
+
+        // Check if the pipe is still occupied (unknown process holding it)
+        var pipeStillOccupied = false;
+        using (var testClient = await ConnectToBackendAsync(ct))
+        {
+            pipeStillOccupied = testClient != null;
+            if (pipeStillOccupied)
+                Log($"  Warning: pipe still occupied after killing all known agents");
         }
 
-        // Start target agent
+        // Start target agent (fresh start since we killed it above)
         StartProcessIfNeeded(agent.ProcessName, agent.ExePath);
         await Task.Delay(3000, ct);
         _currentAgent = agentName;
+
+        // Verify the target agent actually took the pipe
+        var pipeOwner = await DetectPipeOwnerFromKeysAsync(ct);
+        if (pipeOwner != null && pipeOwner != agentName)
+        {
+            Log($"  Pipe still owned by {pipeOwner} after switch, target keys may not be available");
+        }
 
         // Trigger unlock prompt by requesting identities
         // Bitwarden shows unlock dialog on RequestIdentities, not on SignRequest
@@ -732,41 +784,84 @@ public class SshAgentProxyService : IAsyncDisposable
     {
         Log("  Scanning all agents for keys...");
 
-        // Scan all configured agents by priority
+        // Kill ALL agents first to get a clean slate
+        Log("  Stopping all agents for clean scan...");
+        foreach (var (name, config) in _config.GetAgentsByPriority())
+        {
+            await KillProcessAsync(config.ProcessName);
+        }
+        await Task.Delay(1000, ct);
+
+        // Clear stale key mappings so they get rebuilt from scratch
+        _keyToAgent.Clear();
+
+        // Scan each agent exclusively (only one on the pipe at a time)
         foreach (var (agentName, _) in _config.GetAgentsByPriority())
         {
-            await ScanAgentAsync(agentName, ct);
+            await ScanAgentExclusiveAsync(agentName, ct);
         }
 
         _keysScanned = _allKeys.Count > 0;
-        Log($"  Total: {_allKeys.Count} keys");
+        Log($"  Total: {_allKeys.Count} keys from {_keyToAgent.Values.Distinct().Count()} agents");
+
+        // Restore default agent
+        var restoreAgent = _config.DefaultAgent;
+        if (restoreAgent != null)
+        {
+            Log($"  Restoring default agent: {restoreAgent}");
+            var restoreConfig = GetAgentConfig(restoreAgent);
+            if (restoreConfig != null)
+            {
+                // Kill all agents, then start default first so it gets the pipe
+                foreach (var (name, config) in _config.GetAgentsByPriority())
+                {
+                    await KillProcessAsync(config.ProcessName);
+                }
+                await Task.Delay(500, ct);
+                StartProcessIfNeeded(restoreConfig.ProcessName, restoreConfig.ExePath);
+                await Task.Delay(2000, ct);
+                _currentAgent = restoreAgent;
+
+                // Start remaining agents
+                foreach (var otherName in _config.GetOtherAgents(restoreAgent))
+                {
+                    var otherConfig = GetAgentConfig(otherName);
+                    if (otherConfig != null)
+                    {
+                        StartProcessIfNeeded(otherConfig.ProcessName, otherConfig.ExePath);
+                        await Task.Delay(1000, ct);
+                    }
+                }
+            }
+        }
     }
 
-    private async Task ScanAgentAsync(string agentName, CancellationToken ct)
+    /// <summary>
+    /// Scan a single agent exclusively: kill all others, start only this agent, query its keys.
+    /// </summary>
+    private async Task ScanAgentExclusiveAsync(string agentName, CancellationToken ct)
     {
         var agent = GetAgentConfig(agentName);
         if (agent == null)
         {
             Log($"    {agentName}: not configured");
-            Log($"    → Add it to 'agents' in config: {_config.ConfigPath}");
             return;
         }
 
         Log($"    Scanning {agentName}...");
 
-        // Start agent if not running (don't kill other agents)
-        var processes = Process.GetProcessesByName(agent.ProcessName);
-        if (processes.Length == 0)
+        // Kill all agents to release the pipe
+        foreach (var (name, config) in _config.GetAgentsByPriority())
         {
-            Log($"      Starting {agentName}...");
-            StartProcessIfNeeded(agent.ProcessName, agent.ExePath);
-            await Task.Delay(3000, ct); // Wait for startup
+            await KillProcessAsync(config.ProcessName);
         }
+        await Task.Delay(500, ct);
 
-        // Track keys we had before scanning this agent
-        var existingFingerprints = new HashSet<string>(_allKeys.Select(k => k.Fingerprint));
+        // Start ONLY this agent
+        StartProcessIfNeeded(agent.ProcessName, agent.ExePath);
+        await Task.Delay(3000, ct);
 
-        // Wait for keys with retry (user may need to authenticate)
+        // Query keys with retry (user may need to authenticate)
         for (int retry = 0; retry < 5; retry++)
         {
             await Task.Delay(2000, ct);
@@ -781,28 +876,19 @@ public class SshAgentProxyService : IAsyncDisposable
             try
             {
                 var keys = await client.RequestIdentitiesAsync(ct);
-
-                // Find NEW keys that weren't in previous agents
-                var newKeys = keys.Where(k => !existingFingerprints.Contains(k.Fingerprint)).ToList();
-
-                if (newKeys.Count > 0)
+                if (keys.Count > 0)
                 {
-                    Log($"    {agentName}: {newKeys.Count} new keys");
-                    foreach (var key in newKeys)
+                    Log($"    {agentName}: {keys.Count} keys");
+                    foreach (var key in keys)
                     {
+                        // Always update mapping (this agent exclusively owns the pipe)
                         SaveKeyMapping(key, agentName);
-                        _allKeys.Add(key);
+                        if (!_allKeys.Any(k => k.Fingerprint == key.Fingerprint))
+                            _allKeys.Add(key);
                         Log($"      [{agentName}] {key.Comment} ({key.Fingerprint})");
                     }
                     _currentAgent = agentName;
-                    return; // Got new keys, done with this agent
-                }
-
-                // If we see keys but all are from previous agents, the new agent may not have the pipe yet
-                if (keys.Count > 0 && newKeys.Count == 0)
-                {
-                    Log($"      {agentName}: only existing keys, waiting for agent to take pipe... ({retry + 1}/5)");
-                    continue;
+                    return;
                 }
 
                 Log($"      {agentName}: 0 keys, waiting... ({retry + 1}/5)");
@@ -812,7 +898,7 @@ public class SshAgentProxyService : IAsyncDisposable
                 Log($"      {agentName}: error - {ex.Message}");
             }
         }
-        Log($"    {agentName}: no new keys after retries");
+        Log($"    {agentName}: no keys after retries");
     }
 
     private async Task<SshAgentMessage> HandleSignRequestAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
@@ -844,6 +930,15 @@ public class SshAgentProxyService : IAsyncDisposable
             Log($"  No mapping, no current agent, using default: {_config.DefaultAgent}");
         }
 
+        // Step 1.5: Verify pipe ownership by checking backend keys against mappings
+        // Process detection can be wrong (e.g., 1Password running but Bitwarden's SSH agent owns the pipe)
+        var actualPipeOwner = await DetectPipeOwnerFromKeysAsync(ct);
+        if (actualPipeOwner != null && actualPipeOwner != _currentAgent)
+        {
+            Log($"  Pipe owner mismatch: process={_currentAgent}, actual={actualPipeOwner}");
+            _currentAgent = actualPipeOwner;
+        }
+
         // Step 2: If target matches current agent, try signing directly
         if (targetAgent == _currentAgent && _currentAgent != null)
         {
@@ -860,11 +955,11 @@ public class SshAgentProxyService : IAsyncDisposable
                 }
 
                 // Handle orphaned pipe scenario: 1Password running but doesn't have the pipe
-                // (happens when Bitwarden was running and exited)
-                if (result == SignResult.ConnectionFailed && _currentAgent == "1Password")
+                // (happens when Bitwarden was running and exited, pipe has no owner)
+                if (result == SignResult.ConnectionFailed)
                 {
-                    Log($"  Pipe may be orphaned, restarting 1Password...");
-                    var agent = GetAgentConfig("1Password");
+                    Log($"  Pipe may be orphaned, restarting {_currentAgent}...");
+                    var agent = GetAgentConfig(_currentAgent);
                     if (agent != null)
                     {
                         await KillProcessAsync(agent.ProcessName);
@@ -876,9 +971,9 @@ public class SshAgentProxyService : IAsyncDisposable
                         (sig, result) = await TrySignAsync(keyBlob, data, flags, ct);
                         if (sig != null)
                         {
-                            Log($"  Signed by 1Password (after restart)");
+                            Log($"  Signed by {_currentAgent} (after restart)");
                             var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
-                            SaveKeyMapping(fingerprint, "1Password", keyBlob, comment);
+                            SaveKeyMapping(fingerprint, _currentAgent, keyBlob, comment);
                             return SshAgentMessage.SignResponse(sig);
                         }
                     }
@@ -997,8 +1092,11 @@ public class SshAgentProxyService : IAsyncDisposable
 
         try
         {
-            var sig = await client.SignAsync(keyBlob, data, flags, ct);
-            return sig != null ? (sig, SignResult.Success) : (null, SignResult.SignFailed);
+            var (sig, responseType) = await client.SignWithDetailAsync(keyBlob, data, flags, ct);
+            if (sig != null)
+                return (sig, SignResult.Success);
+            Log($"    Sign refused by backend (response: {responseType})");
+            return (null, SignResult.SignFailed);
         }
         catch (OperationCanceledException)
         {

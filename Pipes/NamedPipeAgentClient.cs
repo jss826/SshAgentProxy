@@ -55,6 +55,12 @@ public class NamedPipeAgentClient : IDisposable
 
     public async Task<byte[]?> SignAsync(byte[] keyBlob, byte[] data, uint flags = 0, CancellationToken ct = default)
     {
+        var (sig, _) = await SignWithDetailAsync(keyBlob, data, flags, ct);
+        return sig;
+    }
+
+    public async Task<(byte[]? Signature, SshAgentMessageType ResponseType)> SignWithDetailAsync(byte[] keyBlob, byte[] data, uint flags = 0, CancellationToken ct = default)
+    {
         using var ms = new MemoryStream();
         using var writer = new BinaryWriter(ms);
 
@@ -67,8 +73,11 @@ public class NamedPipeAgentClient : IDisposable
         var request = new SshAgentMessage(SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST, ms.ToArray());
         var response = await SendAsync(request, ct);
 
-        if (response == null || response.Value.Type != SshAgentMessageType.SSH_AGENT_SIGN_RESPONSE)
-            return null;
+        if (response == null)
+            return (null, (SshAgentMessageType)0);
+
+        if (response.Value.Type != SshAgentMessageType.SSH_AGENT_SIGN_RESPONSE)
+            return (null, response.Value.Type);
 
         // Parse signature from response with bounds checking
         var payload = response.Value.Payload.Span;
@@ -77,7 +86,7 @@ public class NamedPipeAgentClient : IDisposable
         var sigLen = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(payload);
         if (sigLen < 0 || 4 + sigLen > payload.Length)
             throw new InvalidDataException($"Sign response invalid: signature length {sigLen} exceeds payload");
-        return payload.Slice(4, sigLen).ToArray();
+        return (payload.Slice(4, sigLen).ToArray(), SshAgentMessageType.SSH_AGENT_SIGN_RESPONSE);
     }
 
     private static void WriteUInt32BigEndian(BinaryWriter writer, uint value)
