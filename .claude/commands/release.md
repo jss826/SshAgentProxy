@@ -23,10 +23,20 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 
 → **承認待ち**
 
+## Phase 1.5: README 更新検討
+
+1. README.md / README.ja.md を読み、現在の実装と乖離がないか確認:
+   - インストール手順（ワンライナー、ソースビルド）
+   - コマンドラインオプション
+   - 機能一覧
+   - 設定項目
+2. 更新が必要な場合はユーザーに報告し、承認後に修正する
+3. 更新不要の場合はスキップして Phase 2 へ進む
+
 ## Phase 2: リリース
 
 1. `SshAgentProxy.csproj` の `<Version>` を新バージョン番号に更新（`v` prefix なし）
-2. バージョン更新をコミット＆プッシュ:
+2. バージョン更新をコミット＆プッシュ（README 更新があればそれも含める）:
    ```
    git add SshAgentProxy.csproj
    git commit -m "chore: bump version to v<version>"

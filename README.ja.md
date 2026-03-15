@@ -42,6 +42,14 @@ SSH Agent Proxyは独自の名前付きパイプ（`\\.\pipe\ssh-agent-proxy`）
 
 ## インストール
 
+### クイックインストール（PowerShell）
+
+```powershell
+irm https://raw.githubusercontent.com/jss826/SshAgentProxy/main/install.ps1 | iex
+```
+
+最新リリースのバイナリをダウンロードし、`%LOCALAPPDATA%\SshAgentProxy` にインストールします。PATHへの追加も選択できます。
+
 ### ソースから
 
 1. リポジトリをクローン：
