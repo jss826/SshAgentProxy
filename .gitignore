@@ -2,8 +2,8 @@ bin/
 obj/
 *.user
 .vs/
-.claude/
-claude.log
+.claude/*.local.*
+.ai-review/
 TestResults/
 publish/
 releases/
