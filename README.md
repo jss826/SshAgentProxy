@@ -60,7 +60,7 @@ This downloads the latest release binary, installs it to `%LOCALAPPDATA%\SshAgen
 
 2. Build and publish:
    ```
-   dotnet publish SshAgentProxy.csproj -c Release -r win-x64 --self-contained -o ./publish
+   dotnet publish SshAgentProxy.csproj -c Release -r win-x64 -o ./publish
    ```
 
 3. Run the proxy:

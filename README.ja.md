@@ -60,7 +60,7 @@ irm https://raw.githubusercontent.com/jss826/SshAgentProxy/main/install.ps1 | ie
 
 2. ビルドして発行：
    ```
-   dotnet publish SshAgentProxy.csproj -c Release -r win-x64 --self-contained -o ./publish
+   dotnet publish SshAgentProxy.csproj -c Release -r win-x64 -o ./publish
    ```
 
 3. プロキシを実行：
