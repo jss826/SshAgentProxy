@@ -26,6 +26,7 @@ public class SshAgentProxyService : IAsyncDisposable
         _failureCache = new FailureCache(config.FailureCacheTtlSeconds);
         _server = new NamedPipeAgentServer(config.ProxyPipeName, HandleRequestAsync);
         _server.OnLog += msg => OnLog?.Invoke(msg);
+        _server.OnClientDisconnected += HandleClientDisconnected;
 
         // Load key mappings from config (including cached key data)
         var agentsInMappings = new HashSet<string>();
@@ -553,7 +554,7 @@ public class SshAgentProxyService : IAsyncDisposable
             return request.Type switch
             {
                 SshAgentMessageType.SSH_AGENTC_REQUEST_IDENTITIES => await HandleRequestIdentitiesAsync(context, ct),
-                SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST => await HandleSignRequestAsync(request.Payload, ct),
+                SshAgentMessageType.SSH_AGENTC_SIGN_REQUEST => await HandleSignRequestAsync(request.Payload, context, ct),
                 _ => await ForwardRequestAsync(request, ct),
             };
         }
@@ -624,6 +625,8 @@ public class SshAgentProxyService : IAsyncDisposable
                 {
                     Log($"  Matched pattern: {mapping.Pattern} -> {mapping.Fingerprint}");
                     matchedFingerprint = mapping.Fingerprint;
+                    context.MatchedPattern = mapping.Pattern;
+                    context.MatchedFingerprint = mapping.Fingerprint;
                     break;
                 }
             }
@@ -681,7 +684,7 @@ public class SshAgentProxyService : IAsyncDisposable
                     keysToReturn = selectedKeys;
                     Log($"  User selected {keysToReturn.Count} key(s)");
 
-                    // Auto-save host key mapping if we have connection info
+                    // Defer auto-save until sign succeeds (prevents saving wrong keys)
                     if (connectionInfo != null && selectedKeys.Count == 1)
                     {
                         var selectedKey = selectedKeys[0];
@@ -690,21 +693,10 @@ public class SshAgentProxyService : IAsyncDisposable
                             ? $"{connectionInfo.Host}:{owner}/*"
                             : $"{connectionInfo.Host}:*";
 
-                        // Check if this pattern already exists (case-insensitive)
-                        var existing = _config.HostKeyMappings.FirstOrDefault(m =>
-                            string.Equals(m.Pattern, pattern, StringComparison.OrdinalIgnoreCase));
-                        if (existing == null)
-                        {
-                            // Specificity-based auto-sort handles precedence; insertion order doesn't matter
-                            _config.HostKeyMappings.Add(new HostKeyMapping
-                            {
-                                Pattern = pattern,
-                                Fingerprint = selectedKey.Fingerprint,
-                                Description = $"Auto-saved: {selectedKey.Comment}"
-                            });
-                            _config.Save();
-                            Log($"  Saved host mapping: {pattern} -> {selectedKey.Fingerprint}");
-                        }
+                        context.PendingSavePattern = pattern;
+                        context.PendingSaveFingerprint = selectedKey.Fingerprint;
+                        context.PendingSaveComment = selectedKey.Comment;
+                        Log($"  Will save host mapping after successful sign: {pattern} -> {selectedKey.Fingerprint}");
                     }
                 }
                 else
@@ -901,11 +893,12 @@ public class SshAgentProxyService : IAsyncDisposable
         Log($"    {agentName}: no keys after retries");
     }
 
-    private async Task<SshAgentMessage> HandleSignRequestAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    private async Task<SshAgentMessage> HandleSignRequestAsync(ReadOnlyMemory<byte> payload, ClientContext context, CancellationToken ct)
     {
         var (keyBlob, data, flags) = SshAgentProtocol.ParseSignRequest(payload);
         var fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(keyBlob))[..16];
 
+        context.SignRequested = true;
         Log($"Request: Sign with key {fingerprint}");
 
         // Step 0: Re-detect current agent from processes (avoids Bitwarden unlock)
@@ -951,6 +944,7 @@ public class SshAgentProxyService : IAsyncDisposable
                     var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
                     SaveKeyMapping(fingerprint, _currentAgent, keyBlob, comment);
                     _failureCache.ClearFailure(fingerprint, _currentAgent);
+                    OnSignSuccess(fingerprint, context);
                     return SshAgentMessage.SignResponse(sig);
                 }
 
@@ -974,6 +968,7 @@ public class SshAgentProxyService : IAsyncDisposable
                             Log($"  Signed by {_currentAgent} (after restart)");
                             var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
                             SaveKeyMapping(fingerprint, _currentAgent, keyBlob, comment);
+                            OnSignSuccess(fingerprint, context);
                             return SshAgentMessage.SignResponse(sig);
                         }
                     }
@@ -1009,6 +1004,7 @@ public class SshAgentProxyService : IAsyncDisposable
                         var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
                         SaveKeyMapping(fingerprint, targetAgent, keyBlob, comment);
                         _failureCache.ClearFailure(fingerprint, targetAgent);
+                        OnSignSuccess(fingerprint, context);
                         return SshAgentMessage.SignResponse(sig);
                     }
                     if (result == SignResult.ConnectionFailed)
@@ -1054,6 +1050,7 @@ public class SshAgentProxyService : IAsyncDisposable
                     var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
                     SaveKeyMapping(fingerprint, agentName, keyBlob, comment);
                     _failureCache.ClearFailure(fingerprint, agentName);
+                    OnSignSuccess(fingerprint, context);
                     return SshAgentMessage.SignResponse(sig);
                 }
                 Log($"    Sign failed on {agentName}");
@@ -1077,6 +1074,92 @@ public class SshAgentProxyService : IAsyncDisposable
 
         Log("  Sign failed on target agent");
         return SshAgentMessage.Failure();
+    }
+
+    /// <summary>
+    /// On successful sign: save/update hostKeyMapping if applicable, and update existing stale mappings.
+    /// </summary>
+    private void OnSignSuccess(string fingerprint, ClientContext context)
+    {
+        // 1. Handle deferred auto-save from dialog selection
+        if (context.PendingSavePattern != null && context.PendingSaveFingerprint != null)
+        {
+            // Only save if the signed key matches what was selected
+            if (string.Equals(fingerprint, context.PendingSaveFingerprint, StringComparison.OrdinalIgnoreCase))
+            {
+                var existing = _config.HostKeyMappings.FirstOrDefault(m =>
+                    string.Equals(m.Pattern, context.PendingSavePattern, StringComparison.OrdinalIgnoreCase));
+                if (existing == null)
+                {
+                    _config.HostKeyMappings.Add(new HostKeyMapping
+                    {
+                        Pattern = context.PendingSavePattern,
+                        Fingerprint = context.PendingSaveFingerprint,
+                        Description = $"Auto-saved: {context.PendingSaveComment}"
+                    });
+                    try { _config.Save(); }
+                    catch (Exception ex) { Log($"  Warning: Failed to save config: {ex.Message}"); }
+                    Log($"  Saved host mapping: {context.PendingSavePattern} -> {context.PendingSaveFingerprint}");
+                }
+            }
+            context.PendingSavePattern = null;
+            context.PendingSaveFingerprint = null;
+            context.PendingSaveComment = null;
+        }
+
+        // 2. Update existing hostKeyMapping if it pointed to a different (stale) fingerprint
+        if (context.MatchedPattern != null && context.MatchedFingerprint != null
+            && !string.Equals(context.MatchedFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+        {
+            var mapping = _config.HostKeyMappings.FirstOrDefault(m =>
+                string.Equals(m.Pattern, context.MatchedPattern, StringComparison.OrdinalIgnoreCase));
+            if (mapping != null)
+            {
+                var comment = _allKeys.FirstOrDefault(k => k.Fingerprint == fingerprint)?.Comment;
+                Log($"  Updating stale host mapping: {mapping.Pattern} {mapping.Fingerprint} -> {fingerprint}");
+                mapping.Fingerprint = fingerprint;
+                mapping.Description = $"Auto-updated: {comment}";
+                try { _config.Save(); }
+                catch (Exception ex) { Log($"  Warning: Failed to save config: {ex.Message}"); }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Handle client disconnect: if a hostKeyMapping was matched but no sign request came,
+    /// the mapping is likely stale (server rejected the key). Remove it so next time all keys are offered.
+    /// Only acts when SSH connection info was successfully detected (avoids false positives from
+    /// non-SSH clients or partial connections like EXTENSION-only requests).
+    /// </summary>
+    private void HandleClientDisconnected(ClientContext context)
+    {
+        // Only remove if: matched a pattern, SSH connection was detected, identity was offered, but no sign came
+        if (context.MatchedPattern == null || context.MatchedFingerprint == null || context.SignRequested)
+            return;
+
+        // Guard: only act if we actually detected an SSH connection (not a random pipe client)
+        var connectionInfo = context.ConnectionInfo; // Already resolved, no new WMI call
+        if (connectionInfo == null)
+            return;
+
+        _stateLock.Wait();
+        try
+        {
+            var mapping = _config.HostKeyMappings.FirstOrDefault(m =>
+                string.Equals(m.Pattern, context.MatchedPattern, StringComparison.OrdinalIgnoreCase));
+            if (mapping != null)
+            {
+                Log($"  Stale host mapping detected (no sign after offer): {mapping.Pattern} -> {mapping.Fingerprint}");
+                Log($"  Removing mapping so all keys will be offered next time");
+                _config.HostKeyMappings.Remove(mapping);
+                try { _config.Save(); }
+                catch (Exception ex) { Log($"  Warning: Failed to save config: {ex.Message}"); }
+            }
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
     }
 
     private enum SignResult { Success, ConnectionFailed, SignFailed }

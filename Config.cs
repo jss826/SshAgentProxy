@@ -6,6 +6,7 @@ namespace SshAgentProxy;
 public class Config
 {
     private static readonly object _saveLock = new();
+    private static readonly JsonSerializerOptions _jsonOptions = new() { WriteIndented = true };
     private string? _configPath;
 
     [JsonPropertyName("proxyPipeName")]
@@ -98,8 +99,7 @@ public class Config
     {
         // Atomic write: write to temp file, then rename
         var tempPath = path + ".tmp";
-        var options = new JsonSerializerOptions { WriteIndented = true };
-        File.WriteAllText(tempPath, JsonSerializer.Serialize(this, options));
+        File.WriteAllText(tempPath, JsonSerializer.Serialize(this, _jsonOptions));
         File.Move(tempPath, path, overwrite: true);
     }
 

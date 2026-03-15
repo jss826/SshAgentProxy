@@ -16,6 +16,12 @@ public class NamedPipeAgentServer : IDisposable
 
     public event Action<string>? OnLog;
 
+    /// <summary>
+    /// Called when a client disconnects. Used to detect stale hostKeyMappings
+    /// (identity offered but no sign request received).
+    /// </summary>
+    public event Action<ClientContext>? OnClientDisconnected;
+
     public NamedPipeAgentServer(string pipeName, Func<SshAgentMessage, ClientContext, CancellationToken, Task<SshAgentMessage>> handler)
     {
         _pipeName = pipeName;
@@ -41,21 +47,22 @@ public class NamedPipeAgentServer : IDisposable
     {
         Log($"Server starting on pipe: {_pipeName}");
 
+        // Cache PipeSecurity outside the loop (avoids repeated WindowsIdentity.GetCurrent() calls)
+        var security = new PipeSecurity();
+        using var identity = WindowsIdentity.GetCurrent();
+        var currentUser = identity.User;
+        if (currentUser != null)
+        {
+            security.AddAccessRule(new PipeAccessRule(
+                currentUser,
+                PipeAccessRights.FullControl,
+                AccessControlType.Allow));
+        }
+
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                // Security: Only allow current user (ssh.exe runs as current user)
-                var security = new PipeSecurity();
-                var currentUser = WindowsIdentity.GetCurrent().User;
-                if (currentUser != null)
-                {
-                    security.AddAccessRule(new PipeAccessRule(
-                        currentUser,
-                        PipeAccessRights.FullControl,
-                        AccessControlType.Allow));
-                }
-
                 var pipe = NamedPipeServerStreamAcl.Create(
                     _pipeName,
                     PipeDirection.InOut,
@@ -116,6 +123,8 @@ public class NamedPipeAgentServer : IDisposable
         }
         finally
         {
+            try { OnClientDisconnected?.Invoke(context); }
+            catch (Exception ex) { Log($"Error in disconnect handler: {ex.Message}"); }
             pipe.Dispose();
         }
     }
@@ -152,6 +161,36 @@ public class ClientContext
     public int ProcessId { get; }
     public SshConnectionInfo? ConnectionInfo { get; private set; }
     private bool _connectionInfoResolved;
+
+    /// <summary>
+    /// The hostKeyMapping pattern that was matched during identity request (null if none)
+    /// </summary>
+    public string? MatchedPattern { get; set; }
+
+    /// <summary>
+    /// The fingerprint returned via hostKeyMapping match (null if none)
+    /// </summary>
+    public string? MatchedFingerprint { get; set; }
+
+    /// <summary>
+    /// Whether a sign request was received during this session
+    /// </summary>
+    public bool SignRequested { get; set; }
+
+    /// <summary>
+    /// The fingerprint selected by user dialog (for deferred auto-save)
+    /// </summary>
+    public string? PendingSaveFingerprint { get; set; }
+
+    /// <summary>
+    /// The pattern to use for deferred auto-save
+    /// </summary>
+    public string? PendingSavePattern { get; set; }
+
+    /// <summary>
+    /// The comment for deferred auto-save
+    /// </summary>
+    public string? PendingSaveComment { get; set; }
 
     public ClientContext(int processId)
     {

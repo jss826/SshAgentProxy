@@ -226,7 +226,7 @@ public class SshConnectionInfo
             return null;
 
         var parts = Repository.TrimStart('/').Split('/');
-        return parts.Length > 0 ? parts[0] : null;
+        return parts.Length > 0 && parts[0].Length > 0 ? parts[0] : null;
     }
 
     /// <summary>
@@ -239,9 +239,6 @@ public class SshConnectionInfo
 
         // Pattern format: "host:owner/*" or "host:*"
         var parts = pattern.Split(':', 2);
-        if (parts.Length == 0)
-            return false;
-
         var patternHost = parts[0];
         var patternPath = parts.Length > 1 ? parts[1] : "*";
 
